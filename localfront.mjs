@@ -20,10 +20,12 @@ import { randomBytes } from 'node:crypto';
 import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const gzip = promisify(zlib.gzip);
 const brotli = promisify(zlib.brotliCompress);
 
+const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.LOCALFRONT_CONFIG || path.resolve(process.cwd(), 'distributions.json');
 const PROXY_PORT = parseInt(process.env.LOCALFRONT_PORT || '8080', 10);
 const ADMIN_PORT = parseInt(process.env.LOCALFRONT_ADMIN_PORT || '5744', 10);
@@ -416,7 +418,7 @@ async function handleAdmin(req, res, state) {
     return sendHtml(res, 200, adminDashboardHtml());
   }
   if (url.pathname === '/style.css' && method === 'GET') {
-    const cssPath = path.join(process.cwd(), 'style.css');
+    const cssPath = path.join(APP_ROOT, 'style.css');
     if (!existsSync(cssPath)) return sendPlain(res, 404, 'style.css not found\n');
     return sendCss(res, 200, readFileSync(cssPath, 'utf8'));
   }
@@ -796,6 +798,7 @@ function adminDashboardHtml() {
 </head>
 <body>
   <div class="wrap">
+    <section class="top-grid">
     <section class="hero">
       <div class="title">
         <div class="eyebrow">LocalFront Admin</div>
@@ -809,11 +812,6 @@ function adminDashboardHtml() {
           <button class="secondary" id="copyApiBtn">Copy admin URL</button>
         </div>
       </div>
-      <aside class="statusbar">
-        <div class="status-label">Service status</div>
-        <div class="status-value" id="healthLine">Checking...</div>
-        <div class="hint" id="healthHint">Loading the admin API and current stats.</div>
-      </aside>
     </section>
 
     <section class="panel stats">
@@ -821,13 +819,19 @@ function adminDashboardHtml() {
         <h2>Overview</h2>
         <div class="hint" id="updatedAt">Not loaded yet</div>
       </div>
+      <div class="overview-status">
+        <div class="status-label">Service status</div>
+        <div class="status-value" id="healthLine">Checking...</div>
+        <div class="hint" id="healthHint">Loading the admin API and current stats.</div>
+      </div>
       <div class="panel-body">
         <div class="stats-grid" id="statsGrid"></div>
       </div>
     </section>
+    </section>
 
-    <section class="grid" style="margin-top:16px;">
-      <section class="panel layout-left">
+    <section class="grid workspace-grid" style="margin-top:16px;">
+      <section class="panel layout-right list-panel">
         <div class="panel-head">
           <h2>Distributions</h2>
           <div class="hint" id="distCount">0 total</div>
@@ -837,7 +841,7 @@ function adminDashboardHtml() {
         </div>
       </section>
 
-      <section class="panel layout-right">
+      <section class="panel layout-left create-panel">
         <div class="panel-head">
           <h2>Create distribution</h2>
           <div class="hint">POST /distributions</div>
@@ -884,7 +888,7 @@ function adminDashboardHtml() {
         </div>
       </section>
 
-      <section class="panel layout-left">
+      <section class="panel layout-left invalidate-panel">
         <div class="panel-head">
           <h2>Invalidate cache</h2>
           <div class="hint">POST /distributions/:id/invalidations</div>
@@ -1281,6 +1285,15 @@ Options for create/update:
 
 Env:
   LOCALFRONT_PORT (8080)  LOCALFRONT_ADMIN_PORT (5744)  LOCALFRONT_CONFIG (./distributions.json)
+
+Friendly hostnames (Windows PowerShell as Administrator):
+  npm run hosts:setup
+  ipconfig /flushdns
+
+MinIO public-read setup:
+  mc alias set local http://localhost:9000 minioadmin minioadmin
+  mc anonymous set download local/<bucket>/<prefix>
+  See README.md for the Docker Compose alternative.
 
 Routing a request to a distribution (any of):
   Host subdomain   http://<id>.localhost:8080/key

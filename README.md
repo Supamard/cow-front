@@ -70,6 +70,56 @@ npm run hosts:setup -- --map admin.local=5744 --map shop.local=4173
 
 This creates `admin.local` and `shop.local` as loopback aliases, used as `http://admin.local:5744` and `http://shop.local:4173`.
 
+### Friendly hostname FAQ
+
+**Why does `localhost:8080` work but `site.local:8080` not work?**
+
+On Windows, open PowerShell as Administrator and run:
+
+```powershell
+npm run hosts:setup
+ipconfig /flushdns
+```
+
+Then verify the alias before opening `http://site.local:8080`:
+
+```powershell
+Resolve-DnsName site.local
+Test-NetConnection site.local -Port 8080
+```
+
+The hosts file maps names to `127.0.0.1`; the port remains part of the URL.
+
+### MinIO anonymous access FAQ
+
+**How do I make the LocalFront origin readable without authentication?**
+
+Set an anonymous read-only policy on the MinIO bucket prefix. Keep the bucket and prefix as variables so this works with any bucket layout:
+
+```bash
+MINIO_BUCKET=uforge-local
+MINIO_PREFIX=data/site.local
+
+mc alias set local http://localhost:9000 minioadmin minioadmin
+mc anonymous set download "local/$MINIO_BUCKET/$MINIO_PREFIX"
+```
+
+If `mc` is not installed on the host, run the setup through the Compose helper container:
+
+```bash
+docker compose run --rm --entrypoint sh createbuckets -c \
+  "mc alias set local http://minio:9000 minioadmin minioadmin && mc anonymous set download local/$MINIO_BUCKET/$MINIO_PREFIX"
+```
+
+Verify the policy and an object:
+
+```bash
+mc anonymous get "local/$MINIO_BUCKET/$MINIO_PREFIX"
+curl -I "http://localhost:9000/$MINIO_BUCKET/$MINIO_PREFIX/example.png"
+```
+
+Use `download` for public reads. It does not grant anonymous upload or delete access. MinIO anonymous policies can target a bucket or a bucket prefix. [`mc anonymous set`](https://docs.min.io/aistor/reference/cli/mc-anonymous/mc-anonymous-set/)
+
 **3. Start the CDN:**
 
 ```bash
@@ -200,6 +250,18 @@ Open `http://localhost:5744/` in a browser to use the dashboard for quick distri
 - **Stale revalidation:** when a cached object expires, LocalFront revalidates with `If-None-Match` / `If-Modified-Since`; a `304` refreshes the TTL and serves the cached body as `X-Cache: RefreshHit`.
 - Caches `GET`/`HEAD` by default; `Range` requests pass through uncached.
 - In-memory LRU cache (default 5000 entries, `LOCALFRONT_CACHE_MAX`).
+
+### Content update cycle
+
+When you overwrite an existing object such as `index.html` in MinIO, LocalFront keeps serving the cached response until its TTL expires, just like a CloudFront distribution. After expiry, it revalidates the object with MinIO: an unchanged object returns `X-Cache: RefreshHit`, while a changed object is fetched and returned as `X-Cache: Miss`.
+
+To publish the new object immediately, invalidate that path after uploading it:
+
+```bash
+node localfront.mjs create-invalidation EM5T9ZZLUF20OC --paths "/index.html"
+```
+
+The next request through `http://site.local:8080/index.html` fetches the new content. Use `--paths "/*"` to invalidate the whole distribution. You can choose a shorter default TTL when creating or updating a distribution, for example `--default-ttl 300` for five-minute revalidation.
 
 ## Configuration (env)
 

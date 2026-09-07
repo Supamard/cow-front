@@ -2,11 +2,23 @@
   "name": "localfront",
   "version": "1.0.0",
   "description": "A local, CloudFront-like CDN emulator that fronts MinIO or any HTTP origin. Zero dependencies.",
+  "author": "Supamard Jittithammawat",
   "type": "module",
+  "keywords": [
+    "cdn",
+    "cloudfront",
+    "minio",
+    "s3",
+    "cache",
+    "proxy",
+    "cli"
+  ],
   "bin": {
     "localfront": "./localfront.mjs"
   },
   "scripts": {
+    "test": "node --test",
+    "prepublishOnly": "npm test && npm pack --dry-run",
     "serve": "node localfront.mjs serve",
     "minio:up": "node scripts/minio-up.mjs",
     "minio:down": "docker compose down",
@@ -15,5 +27,23 @@
   "engines": {
     "node": ">=18"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "docker-compose.yml",
+    "fake-origin.mjs",
+    "localfront.mjs",
+    "style.css",
+    "scripts",
+    "tests"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Supamard/local-front.git"
+  },
+  "homepage": "https://github.com/Supamard/local-front#readme",
+  "bugs": {
+    "url": "https://github.com/Supamard/local-front/issues"
+  }
 }

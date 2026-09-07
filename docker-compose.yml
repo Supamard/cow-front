@@ -1,0 +1,43 @@
+# MinIO stand-in for S3, plus a one-shot job that creates a public "assets" bucket.
+# Start it with:  docker compose up -d
+# Console:        http://localhost:9001  (user: minioadmin / pass: minioadmin)
+# S3 endpoint:    http://localhost:9000  <-- point a LocalFront distribution here
+#
+# LocalFront itself runs on the host (node localfront.mjs serve), NOT in compose,
+# so it can bind localhost and reach MinIO at http://localhost:9000.
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set local http://minio:9000 minioadmin minioadmin) do echo 'waiting for minio...'; sleep 1; done;
+      mc mb -p local/assets;
+      mc anonymous set download local/assets;
+      echo 'seeding a sample object...';
+      echo 'hello from minio via LocalFront' | mc pipe local/assets/hello.txt;
+      echo 'done. bucket assets is public-read (download).';
+      exit 0;
+      "
+
+volumes:
+  minio-data:

@@ -21,8 +21,10 @@ browser ──▶ LocalFront (:8080)  ──▶  MinIO (:9000)  [bucket = origin
 **1. Start MinIO** (creates a public-read `assets` bucket + a sample `hello.txt`):
 
 ```bash
-docker compose up -d
+npm run minio:up
 ```
+
+The startup script scans ports `9000` and `9001` first. If MinIO is already listening, it skips the Compose launch instead of failing. If MinIO is not found, it asks whether Docker Compose should start it. Use `npm run minio:up -- --yes` to start without prompting.
 
 **2. Create a distribution** pointing at the MinIO bucket:
 
@@ -34,6 +36,39 @@ node localfront.mjs create-distribution \
 ```
 
 This prints a CloudFront-style **Distribution ID** (e.g. `E1A2B3C4D5E6F7`) and a domain `e1a2b3c4d5e6f7.localhost`.
+
+### Friendly local hostnames
+
+Install the optional loopback aliases:
+
+```bash
+npm run hosts:setup
+```
+
+On Windows, run the terminal as Administrator because updating the hosts file requires elevation. The command adds `site.local`, `api.local`, and `app.local` as aliases for `127.0.0.1`. Ports are still part of the URL because hosts files do not route ports:
+
+```text
+http://site.local:8080  -> LocalFront
+http://api.local:3001   -> API service
+http://app.local:3000   -> App service
+```
+
+Create a distribution with a friendly viewer hostname:
+
+```bash
+node localfront.mjs create-distribution --domain site.local \
+  --origin http://localhost:9000 --origin-path /assets
+```
+
+Remove the aliases later with `npm run hosts:setup -- --remove`.
+
+Add your own aliases by passing one or more `--map` options. Both `name.local=port` and `name.local:port` are accepted:
+
+```bash
+npm run hosts:setup -- --map admin.local=5744 --map shop.local=4173
+```
+
+This creates `admin.local` and `shop.local` as loopback aliases, used as `http://admin.local:5744` and `http://shop.local:4173`.
 
 **3. Start the CDN:**
 
@@ -63,6 +98,26 @@ GET http://localhost:9000/assets/img/logo.png   (MinIO path-style: /<bucket>/<ke
 ```
 
 `--origin-path` is your bucket (CloudFront calls this the *Origin Path*). The object key follows.
+
+For a MinIO bucket with an object prefix, include both values in the origin path. For example, if the bucket is `uforge-local` and the objects are under `data/site.local/`, LocalFront requests `/uforge-local/data/site.local/<object-key>` from MinIO:
+
+```bash
+MINIO_BUCKET=uforge-local
+MINIO_PREFIX=data/site.local
+node localfront.mjs create-distribution \
+  --domain site.local \
+  --origin http://localhost:9000 \
+  --origin-path "/$MINIO_BUCKET/$MINIO_PREFIX"
+```
+
+The bucket and prefix are only command/config values; LocalFront does not hard-code either one. To repair an existing distribution, use the same variables with `update-distribution`:
+
+```bash
+node localfront.mjs update-distribution EM5T9ZZLUF20OC \
+  --origin-path "/$MINIO_BUCKET/$MINIO_PREFIX"
+```
+
+Use the MinIO API port `9000` as the origin. Port `9001` is only the MinIO web console.
 
 > MinIO note: LocalFront fetches over anonymous HTTP, so the bucket/prefix must be readable. The compose file runs `mc anonymous set download local/assets` for you. This mirrors a public origin; if you need signed access instead, that's an extension point (see below).
 
@@ -109,6 +164,7 @@ Runs on `http://localhost:5744`:
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/` | small admin dashboard UI |
 | GET | `/distributions` | list |
 | POST | `/distributions` | create |
 | GET | `/distributions/:id` | get |
@@ -117,6 +173,8 @@ Runs on `http://localhost:5744`:
 | POST | `/distributions/:id/invalidations` | `{ "paths": ["/*"] }` |
 | GET | `/stats` | cache size + hit/miss counters |
 | GET | `/health` | liveness |
+
+Open `http://localhost:5744/` in a browser to use the dashboard for quick distribution management and cache invalidation.
 
 ## CloudFront concept mapping
 

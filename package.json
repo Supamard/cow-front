@@ -8,8 +8,9 @@
   },
   "scripts": {
     "serve": "node localfront.mjs serve",
-    "minio:up": "docker compose up -d",
-    "minio:down": "docker compose down"
+    "minio:up": "node scripts/minio-up.mjs",
+    "minio:down": "docker compose down",
+    "hosts:setup": "node scripts/setup-hosts.mjs"
   },
   "engines": {
     "node": ">=18"

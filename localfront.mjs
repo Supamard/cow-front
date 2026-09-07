@@ -101,6 +101,18 @@ function saveConfig(cfg) {
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
 }
 
+function normalizeOriginPath(value) {
+  let originPath = String(value || '').trim().replaceAll('\\', '/');
+  // Git Bash rewrites CLI values such as /assets to <git-install>/assets on Windows.
+  const gitRoot = originPath.match(/^\w:\/[^/]+\/Git\/(.*)$/i);
+  if (gitRoot) originPath = gitRoot[1];
+  if (/^\w:\//.test(originPath)) {
+    throw new Error(`origin-path must be a URL path such as /assets, not a filesystem path: ${value}`);
+  }
+  if (!originPath) return '';
+  return '/' + originPath.replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
 function normalizeDistribution(input) {
   if (!input.origin || !input.origin.domainName) {
     throw new Error('origin.domainName is required (e.g. http://localhost:9000)');
@@ -114,7 +126,7 @@ function normalizeDistribution(input) {
     domainName: input.domainName || `${id.toLowerCase()}.localhost`,
     origin: {
       domainName: String(input.origin.domainName).replace(/\/+$/, ''),
-      originPath: (input.origin.originPath || '').replace(/\/+$/, ''),
+      originPath: normalizeOriginPath(input.origin.originPath),
       customHeaders: input.origin.customHeaders || {},
     },
     defaultCacheBehavior: {
@@ -360,6 +372,20 @@ function sendJson(res, code, obj) {
   res.writeHead(code, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
   res.end(body);
 }
+function sendHtml(res, code, html) {
+  res.writeHead(code, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(html),
+  });
+  res.end(html);
+}
+function sendCss(res, code, css) {
+  res.writeHead(code, {
+    'content-type': 'text/css; charset=utf-8',
+    'content-length': Buffer.byteLength(css),
+  });
+  res.end(css);
+}
 function sendPlain(res, code, text) {
   res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8' });
   res.end(text);
@@ -385,6 +411,15 @@ async function handleAdmin(req, res, state) {
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
   const method = req.method;
+
+  if (url.pathname === '/' && method === 'GET') {
+    return sendHtml(res, 200, adminDashboardHtml());
+  }
+  if (url.pathname === '/style.css' && method === 'GET') {
+    const cssPath = path.join(process.cwd(), 'style.css');
+    if (!existsSync(cssPath)) return sendPlain(res, 404, 'style.css not found\n');
+    return sendCss(res, 200, readFileSync(cssPath, 'utf8'));
+  }
 
   if (url.pathname === '/health') return sendJson(res, 200, { ok: true, service: 'localfront' });
 
@@ -439,6 +474,655 @@ async function handleAdmin(req, res, state) {
   }
 
   return sendJson(res, 404, { error: 'not found', hint: 'GET /distributions, POST /distributions, /stats, /health' });
+}
+
+function adminDashboardHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LocalFront Admin</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08111f;
+      --bg2: #0d1a31;
+      --panel: rgba(12, 20, 38, 0.82);
+      --panel-strong: rgba(18, 29, 52, 0.96);
+      --line: rgba(153, 180, 255, 0.16);
+      --text: #eaf1ff;
+      --muted: #9eb0d4;
+      --accent: #72d6ff;
+      --accent-2: #8b7bff;
+      --good: #5ce3b0;
+      --warn: #ffd48c;
+      --bad: #ff8ca1;
+      --shadow: 0 24px 90px rgba(0, 0, 0, 0.4);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 10%, rgba(114, 214, 255, 0.18), transparent 30%),
+        radial-gradient(circle at 85% 0%, rgba(139, 123, 255, 0.18), transparent 28%),
+        linear-gradient(180deg, var(--bg), var(--bg2));
+    }
+    .wrap {
+      width: min(1200px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 48px;
+    }
+    .hero {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: 1.5fr 0.9fr;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+    .title {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: linear-gradient(180deg, rgba(20, 31, 57, 0.95), rgba(12, 20, 38, 0.86));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--accent);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--good);
+      box-shadow: 0 0 18px var(--good);
+    }
+    h1 {
+      margin: 12px 0 10px;
+      font-size: clamp(30px, 4vw, 52px);
+      line-height: 0.98;
+      letter-spacing: -0.04em;
+    }
+    .sub {
+      margin: 0;
+      max-width: 68ch;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+    .statusbar {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .status-label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      margin-bottom: 8px;
+    }
+    .status-value {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0 0 10px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 18px 0;
+    }
+    button, .ghost, input, textarea {
+      font: inherit;
+    }
+    button, .ghost {
+      border: 1px solid transparent;
+      border-radius: 14px;
+      padding: 11px 14px;
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+    button:hover, .ghost:hover { transform: translateY(-1px); }
+    button.primary {
+      color: #07111f;
+      background: linear-gradient(135deg, var(--accent), #9df0ff);
+      font-weight: 800;
+    }
+    button.secondary, .ghost {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+      border-color: var(--line);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+      overflow: hidden;
+    }
+    .panel h2 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 20px 22px 0;
+    }
+    .panel-body { padding: 18px 22px 22px; }
+    .stats { grid-column: span 12; }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      padding-top: 18px;
+    }
+    .card {
+      padding: 16px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .card .label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+    .card .value {
+      margin-top: 10px;
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+    .layout-left { grid-column: span 7; }
+    .layout-right { grid-column: span 5; }
+    .table {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .dist {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid rgba(255,255,255,0.06);
+      display: grid;
+      gap: 12px;
+    }
+    .dist-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: start;
+    }
+    .dist-id {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .chip.good { color: var(--good); }
+    .chip.bad { color: var(--bad); }
+    .meta {
+      display: grid;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    form {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .field-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    input, textarea {
+      width: 100%;
+      color: var(--text);
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 14px;
+      padding: 11px 12px;
+      outline: none;
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    input:focus, textarea:focus {
+      border-color: rgba(114, 214, 255, 0.48);
+      box-shadow: 0 0 0 4px rgba(114, 214, 255, 0.12);
+    }
+    .checks {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .checks label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .checks input { width: auto; }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .empty {
+      padding: 24px;
+      border-radius: 18px;
+      border: 1px dashed rgba(255,255,255,0.12);
+      color: var(--muted);
+      text-align: center;
+    }
+    .footer-note {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    @media (max-width: 980px) {
+      .hero, .layout-left, .layout-right, .stats-grid, .field-row {
+        grid-template-columns: 1fr;
+      }
+      .hero { grid-template-columns: 1fr; }
+      .layout-left, .layout-right, .stats { grid-column: span 12; }
+      .stats-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 720px) {
+      .wrap { width: min(100vw - 20px, 1200px); padding-top: 10px; }
+      .title, .statusbar, .panel { border-radius: 18px; }
+      .stats-grid { grid-template-columns: 1fr; }
+      .panel-head, .panel-body { padding-left: 16px; padding-right: 16px; }
+      .actions, .toolbar { flex-direction: column; align-items: stretch; }
+      button, .ghost { width: 100%; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="title">
+        <div class="eyebrow">LocalFront Admin</div>
+        <h1>Control your local CDN from one small dashboard.</h1>
+        <p class="sub">
+          Create distributions, watch cache health, and invalidate objects without leaving the browser.
+          Everything here talks to the admin API on port ${ADMIN_PORT}, while the proxy stays on port ${PROXY_PORT}.
+        </p>
+        <div class="toolbar">
+          <button class="primary" id="refreshBtn">Refresh data</button>
+          <button class="secondary" id="copyApiBtn">Copy admin URL</button>
+        </div>
+      </div>
+      <aside class="statusbar">
+        <div class="status-label">Service status</div>
+        <div class="status-value" id="healthLine">Checking...</div>
+        <div class="hint" id="healthHint">Loading the admin API and current stats.</div>
+      </aside>
+    </section>
+
+    <section class="panel stats">
+      <div class="panel-head">
+        <h2>Overview</h2>
+        <div class="hint" id="updatedAt">Not loaded yet</div>
+      </div>
+      <div class="panel-body">
+        <div class="stats-grid" id="statsGrid"></div>
+      </div>
+    </section>
+
+    <section class="grid" style="margin-top:16px;">
+      <section class="panel layout-left">
+        <div class="panel-head">
+          <h2>Distributions</h2>
+          <div class="hint" id="distCount">0 total</div>
+        </div>
+        <div class="panel-body">
+          <div class="table" id="distributionList"></div>
+        </div>
+      </section>
+
+      <section class="panel layout-right">
+        <div class="panel-head">
+          <h2>Create distribution</h2>
+          <div class="hint">POST /distributions</div>
+        </div>
+        <div class="panel-body">
+          <form id="createForm">
+            <div class="field-row">
+              <label>Origin URL
+                <input name="origin" placeholder="http://localhost:9000" required />
+              </label>
+              <label>Origin path
+                <input name="origin-path" placeholder="/assets" />
+              </label>
+            </div>
+            <label>Friendly hostname
+              <input name="domain" placeholder="site.local (optional)" />
+            </label>
+            <div class="field-row">
+              <label>Default TTL
+                <input name="default-ttl" type="number" min="0" placeholder="86400" />
+              </label>
+              <label>Min TTL
+                <input name="min-ttl" type="number" min="0" placeholder="0" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>Max TTL
+                <input name="max-ttl" type="number" min="0" placeholder="31536000" />
+              </label>
+              <label>Distribution ID
+                <input name="id" placeholder="optional" />
+              </label>
+            </div>
+            <label>Comment
+              <textarea name="comment" placeholder="Optional note for this distribution"></textarea>
+            </label>
+            <div class="checks">
+              <label><input name="compress" type="checkbox" checked /> Compress objects</label>
+              <label><input name="forward-query" type="checkbox" /> Forward query string</label>
+            </div>
+            <button class="primary" type="submit">Create distribution</button>
+            <div class="hint">A distribution ID is generated automatically unless you provide one.</div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel layout-left">
+        <div class="panel-head">
+          <h2>Invalidate cache</h2>
+          <div class="hint">POST /distributions/:id/invalidations</div>
+        </div>
+        <div class="panel-body">
+          <form id="invalidationForm">
+            <div class="field-row">
+              <label>Distribution ID
+                <input name="distribution" placeholder="E1A2B3C4D5E6F7" required />
+              </label>
+              <label>Paths
+                <input name="paths" placeholder="/*, /img/*" />
+              </label>
+            </div>
+            <button class="primary" type="submit">Invalidate</button>
+            <div class="hint">Separate multiple invalidation paths with commas.</div>
+          </form>
+        </div>
+      </section>
+    </section>
+    <div class="footer-note">
+      Admin UI served by LocalFront. The proxy endpoint remains available on port ${PROXY_PORT}.
+    </div>
+  </div>
+
+  <script>
+    const proxyPort = ${PROXY_PORT};
+    const adminPort = ${ADMIN_PORT};
+    const el = (sel) => document.querySelector(sel);
+
+    const state = { distributions: [], stats: {}, health: null };
+
+    function fmtTime(ts) {
+      return new Date(ts).toLocaleString([], {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+      });
+    }
+
+    function statCard(label, value) {
+      return \`
+        <div class="card">
+          <div class="label">\${label}</div>
+          <div class="value">\${value}</div>
+        </div>
+      \`;
+    }
+
+    function copy(text) {
+      return navigator.clipboard.writeText(text);
+    }
+
+    function render() {
+      const stats = state.stats || {};
+      const hits = Number(stats.hits || 0);
+      const misses = Number(stats.misses || 0);
+      const refreshHits = Number(stats.refreshHits || 0);
+      const requests = Number(stats.requests || 0);
+      const hitRate = requests ? Math.round(((hits + refreshHits) / requests) * 100) : 0;
+
+      el('#statsGrid').innerHTML = [
+        statCard('Requests', requests.toLocaleString()),
+        statCard('Cache entries', Number(stats.cacheEntries || 0).toLocaleString()),
+        statCard('Hit rate', hitRate + '%'),
+        statCard('Distributions', Number(stats.distributions || state.distributions.length || 0).toLocaleString())
+      ].join('');
+
+      el('#distCount').textContent = state.distributions.length + ' total';
+
+      if (!state.distributions.length) {
+        el('#distributionList').innerHTML = '<div class="empty">No distributions yet. Use the form on the right to create the first one.</div>';
+      } else {
+        el('#distributionList').innerHTML = state.distributions.map((d) => {
+          const enabled = d.enabled !== false;
+          const proxyUrl = 'http://' + d.domainName + ':' + proxyPort + '/';
+          const originUrl = d.origin.domainName + (d.origin.originPath || '');
+          const ttl = [d.defaultCacheBehavior.minTtl, d.defaultCacheBehavior.defaultTtl, d.defaultCacheBehavior.maxTtl].join(' / ');
+          return \`
+            <article class="dist">
+              <div class="dist-top">
+                <div>
+                  <div class="dist-id">\${d.id}</div>
+                  <div class="meta">
+                    <div><strong>Domain</strong> <a href="\${proxyUrl}" target="_blank" rel="noreferrer">\${proxyUrl}</a></div>
+                    <div><strong>Origin</strong> \${originUrl}</div>
+                    <div><strong>TTL</strong> min / default / max = \${ttl}</div>
+                  </div>
+                </div>
+                <div class="chip \${enabled ? 'good' : 'bad'}">\${enabled ? 'Enabled' : 'Disabled'}</div>
+              </div>
+              <div class="meta">
+                <div><strong>Comment</strong> \${d.comment || '—'}</div>
+                <div><strong>Created</strong> \${fmtTime(d.createdAt)}</div>
+              </div>
+              <div class="actions">
+                <button class="ghost" data-copy="\${d.id}">Copy ID</button>
+                <button class="ghost" data-proxy="\${d.id}">Copy proxy URL</button>
+                <button class="ghost" data-invalidate="\${d.id}">Invalidate /*</button>
+                <button class="ghost" data-delete="\${d.id}">Delete</button>
+              </div>
+            </article>
+          \`;
+        }).join('');
+
+        el('#distributionList').querySelectorAll('[data-copy]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            await copy(btn.dataset.copy);
+            btn.textContent = 'Copied';
+            setTimeout(() => (btn.textContent = 'Copy ID'), 900);
+          });
+        });
+        el('#distributionList').querySelectorAll('[data-proxy]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.dataset.proxy;
+            const d = state.distributions.find((x) => x.id === id);
+            if (!d) return;
+            const url = 'http://' + d.domainName + ':' + proxyPort + '/';
+            await copy(url);
+            btn.textContent = 'Copied';
+            setTimeout(() => (btn.textContent = 'Copy proxy URL'), 900);
+          });
+        });
+        el('#distributionList').querySelectorAll('[data-invalidate]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            el('input[name="distribution"]').value = btn.dataset.invalidate;
+            el('input[name="paths"]').value = '/*';
+            el('#invalidationForm').scrollIntoView({ behavior: 'smooth', block: 'center' });
+          });
+        });
+        el('#distributionList').querySelectorAll('[data-delete]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.dataset.delete;
+            if (!confirm('Delete distribution ' + id + '?')) return;
+            const r = await fetch('/distributions/' + encodeURIComponent(id), { method: 'DELETE' });
+            if (!r.ok) {
+              const data = await r.json().catch(() => ({}));
+              throw new Error(data.error || 'delete failed');
+            }
+            await load();
+          });
+        });
+      }
+
+      el('#healthLine').textContent = state.health?.ok ? 'Healthy' : 'Unreachable';
+      el('#healthHint').textContent = state.health?.ok
+        ? 'Admin API is responding on port ' + adminPort + '.'
+        : 'Waiting for the admin API to answer.';
+      el('#updatedAt').textContent = 'Updated ' + fmtTime(Date.now());
+    }
+
+    async function load() {
+      const [healthRes, statsRes, distRes] = await Promise.all([
+        fetch('/health').catch(() => null),
+        fetch('/stats').catch(() => null),
+        fetch('/distributions').catch(() => null),
+      ]);
+
+      state.health = healthRes ? await healthRes.json().catch(() => ({ ok: false })) : { ok: false };
+      state.stats = statsRes ? await statsRes.json().catch(() => ({})) : {};
+      state.distributions = distRes ? (await distRes.json().catch(() => ({ distributions: [] }))).distributions || [] : [];
+      render();
+    }
+
+    el('#refreshBtn').addEventListener('click', load);
+    el('#copyApiBtn').addEventListener('click', async () => {
+      await copy('http://localhost:' + adminPort + '/');
+      el('#copyApiBtn').textContent = 'Copied';
+      setTimeout(() => (el('#copyApiBtn').textContent = 'Copy admin URL'), 900);
+    });
+
+    el('#createForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = Object.fromEntries(new FormData(form).entries());
+      data.enabled = true;
+      data.defaultTtl = data['default-ttl'] ? Number(data['default-ttl']) : undefined;
+      data.minTtl = data['min-ttl'] ? Number(data['min-ttl']) : undefined;
+      data.maxTtl = data['max-ttl'] ? Number(data['max-ttl']) : undefined;
+      data.compress = form.querySelector('[name="compress"]').checked;
+      data.forwardQueryString = form.querySelector('[name="forward-query"]').checked;
+      if (!data.comment) delete data.comment;
+      if (!data.id) delete data.id;
+      if (!data.originPath && !data['origin-path']) delete data.originPath;
+      const body = {
+        origin: { domainName: data.origin },
+        comment: data.comment || '',
+        defaultCacheBehavior: {
+          compress: data.compress,
+          forwardQueryString: data.forwardQueryString,
+        },
+      };
+      if (data.id) body.id = data.id;
+      if (data.domain) body.domainName = data.domain;
+      if (data['origin-path']) body.origin.originPath = data['origin-path'];
+      if (data.defaultTtl !== undefined) body.defaultCacheBehavior.defaultTtl = data.defaultTtl;
+      if (data.minTtl !== undefined) body.defaultCacheBehavior.minTtl = data.minTtl;
+      if (data.maxTtl !== undefined) body.defaultCacheBehavior.maxTtl = data.maxTtl;
+      const r = await fetch('/distributions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error(data.error || 'create failed');
+      }
+      form.reset();
+      form.querySelector('[name="compress"]').checked = true;
+      await load();
+    });
+
+    el('#invalidationForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const dist = form.querySelector('[name="distribution"]').value.trim();
+      const rawPaths = form.querySelector('[name="paths"]').value.trim();
+      const paths = rawPaths ? rawPaths.split(',').map((s) => s.trim()).filter(Boolean) : ['/*'];
+      const r = await fetch('/distributions/' + encodeURIComponent(dist) + '/invalidations', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ paths }),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error(data.error || 'invalidation failed');
+      }
+      form.reset();
+      await load();
+    });
+
+    load().catch((err) => {
+      el('#healthLine').textContent = 'Dashboard error';
+      el('#healthHint').textContent = err.message;
+      console.error(err);
+    });
+  </script>
+</body>
+</html>`;
 }
 
 function persist(state) {
@@ -530,6 +1214,7 @@ function distFromFlags(f, existing) {
   if (f['origin-path'] !== undefined) d.origin.originPath = f['origin-path'] === true ? '' : f['origin-path'];
   if (f.comment) d.comment = f.comment;
   if (f.id) d.id = f.id;
+  if (f.domain) d.domainName = f.domain;
   if (f['default-ttl'] !== undefined) d.defaultCacheBehavior.defaultTtl = +f['default-ttl'];
   if (f['min-ttl'] !== undefined) d.defaultCacheBehavior.minTtl = +f['min-ttl'];
   if (f['max-ttl'] !== undefined) d.defaultCacheBehavior.maxTtl = +f['max-ttl'];
@@ -585,6 +1270,7 @@ Usage:
 Options for create/update:
   --origin <url>          origin endpoint, e.g. http://localhost:9000 (MinIO)
   --origin-path <path>    prepended to every request, e.g. /assets (the bucket)
+  --domain <hostname>     friendly viewer hostname, e.g. site.local
   --default-ttl <sec>     TTL when origin sends no cache headers (default 86400)
   --min-ttl <sec>         floor TTL (default 0)
   --max-ttl <sec>         ceiling TTL (default 31536000)

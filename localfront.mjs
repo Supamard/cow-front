@@ -324,12 +324,16 @@ async function handleProxy(req, res, state) {
   }
 
   // fetch from origin (conditional revalidation if we hold a stale entry)
+  const isRevalidation = !!cached;
   const originUrl = dist.origin.domainName + dist.origin.originPath + urlObj.pathname + urlObj.search;
   const fwd = buildForwardHeaders(req, dist, cached);
   let originRes;
   try {
     originRes = await fetch(originUrl, { method, headers: fwd, redirect: 'manual' });
   } catch (e) {
+    if (isRevalidation) {
+      recordRevalidation(state, { distribution: dist.id, method, path: urlObj.pathname, origin: originUrl, status: 'error', result: 'failed' });
+    }
     return sendPlain(res, 502, `LocalFront: origin fetch failed (${originUrl}): ${e.message}\n`);
   }
 
@@ -340,6 +344,15 @@ async function handleProxy(req, res, state) {
     cached.storedAt = now;
     cached.expiresAt = now + ttl * 1000;
     state.cache.set(key, cached);
+    recordRevalidation(state, {
+      distribution: dist.id,
+      method,
+      path: urlObj.pathname,
+      origin: originUrl,
+      status: 304,
+      result: 'not-modified',
+      ttl,
+    });
     return deliver(res, req, dist, cached, 'RefreshHit', state.metrics);
   }
 
@@ -364,6 +377,18 @@ async function handleProxy(req, res, state) {
     lastModified: resHeaders['last-modified'],
   };
   if (shouldStore) state.cache.set(key, entry);
+
+  if (isRevalidation) {
+    recordRevalidation(state, {
+      distribution: dist.id,
+      method,
+      path: urlObj.pathname,
+      origin: originUrl,
+      status,
+      result: 'updated',
+      ttl: shouldStore ? ttl : 0,
+    });
+  }
 
   return deliver(res, req, dist, entry, 'Miss', state.metrics);
 }
@@ -409,6 +434,13 @@ function readBody(req) {
   });
 }
 
+function recordRevalidation(state, event) {
+  const item = { id: 'R' + genId().slice(1), timestamp: new Date().toISOString(), ...event };
+  state.revalidations.unshift(item);
+  if (state.revalidations.length > 100) state.revalidations.length = 100;
+  console.log(`[revalidate] ${item.distribution} ${item.method} ${item.path} -> ${item.status} ${item.result}${item.ttl === undefined ? '' : ` ttl=${item.ttl}s`}`);
+}
+
 async function handleAdmin(req, res, state) {
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
@@ -432,6 +464,10 @@ async function handleAdmin(req, res, state) {
       distributions: state.config.distributions.length,
       ...state.metrics,
     });
+  }
+
+  if (url.pathname === '/revalidations' && method === 'GET') {
+    return sendJson(res, 200, { revalidations: state.revalidations });
   }
 
   if (parts[0] === 'distributions') {
@@ -470,6 +506,14 @@ async function handleAdmin(req, res, state) {
         const body = await readBody(req);
         const paths = body.paths && body.paths.length ? body.paths : ['/*'];
         const count = state.cache.invalidate(state.config.distributions[idx].id, paths);
+        recordRevalidation(state, {
+          distribution: state.config.distributions[idx].id,
+          method: 'PURGE',
+          path: paths.join(', '),
+          origin: '',
+          status: count,
+          result: 'invalidated',
+        });
         return sendJson(res, 201, { id: 'I' + genId().slice(1), distribution: state.config.distributions[idx].id, paths, invalidated: count });
       }
     }
@@ -909,6 +953,15 @@ function adminDashboardHtml() {
         </div>
       </section>
     </section>
+    <section class="panel revalidation-panel">
+      <div class="panel-head">
+        <h2>Revalidation history</h2>
+        <div class="hint">latest 100 checks</div>
+      </div>
+      <div class="panel-body">
+        <div class="history-table" id="revalidationList"></div>
+      </div>
+    </section>
     <div class="footer-note">
       Admin UI served by LocalFront. The proxy endpoint remains available on port ${PROXY_PORT}.
     </div>
@@ -919,13 +972,19 @@ function adminDashboardHtml() {
     const adminPort = ${ADMIN_PORT};
     const el = (sel) => document.querySelector(sel);
 
-    const state = { distributions: [], stats: {}, health: null };
+    const state = { distributions: [], revalidations: [], stats: {}, health: null };
 
     function fmtTime(ts) {
       return new Date(ts).toLocaleString([], {
         year: 'numeric', month: 'short', day: 'numeric',
         hour: '2-digit', minute: '2-digit', second: '2-digit'
       });
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[char]));
     }
 
     function statCard(label, value) {
@@ -1032,6 +1091,24 @@ function adminDashboardHtml() {
         });
       }
 
+      if (!state.revalidations.length) {
+        el('#revalidationList').innerHTML = '<div class="empty">No cache revalidations or invalidations yet.</div>';
+      } else {
+        el('#revalidationList').innerHTML = \`
+          <div class="history-row history-head"><span>Time</span><span>Distribution</span><span>Path</span><span>Status</span><span>Result</span><span>TTL</span></div>
+          \${state.revalidations.map((item) => \`
+            <div class="history-row">
+              <span>\${escapeHtml(fmtTime(item.timestamp))}</span>
+              <span class="mono">\${escapeHtml(item.distribution)}</span>
+              <span class="mono path-cell">\${escapeHtml(item.path)}</span>
+              <span>\${escapeHtml(item.status)}</span>
+              <span class="result-\${escapeHtml(item.result)}">\${escapeHtml(item.result)}</span>
+              <span>\${item.ttl === undefined ? '—' : escapeHtml(item.ttl + 's')}</span>
+            </div>
+          \`).join('')}
+        \`;
+      }
+
       el('#healthLine').textContent = state.health?.ok ? 'Healthy' : 'Unreachable';
       el('#healthHint').textContent = state.health?.ok
         ? 'Admin API is responding on port ' + adminPort + '.'
@@ -1040,15 +1117,17 @@ function adminDashboardHtml() {
     }
 
     async function load() {
-      const [healthRes, statsRes, distRes] = await Promise.all([
+      const [healthRes, statsRes, distRes, revalidationRes] = await Promise.all([
         fetch('/health').catch(() => null),
         fetch('/stats').catch(() => null),
         fetch('/distributions').catch(() => null),
+        fetch('/revalidations').catch(() => null),
       ]);
 
       state.health = healthRes ? await healthRes.json().catch(() => ({ ok: false })) : { ok: false };
       state.stats = statsRes ? await statsRes.json().catch(() => ({})) : {};
       state.distributions = distRes ? (await distRes.json().catch(() => ({ distributions: [] }))).distributions || [] : [];
+      state.revalidations = revalidationRes ? (await revalidationRes.json().catch(() => ({ revalidations: [] }))).revalidations || [] : [];
       render();
     }
 
@@ -1142,6 +1221,7 @@ function serve() {
     config: { distributions: cfg.distributions.map(normalizeDistribution) },
     cache: new Cache(CACHE_MAX),
     metrics: { requests: 0, hits: 0, misses: 0, refreshHits: 0 },
+    revalidations: [],
     suppressReload: false,
   };
 

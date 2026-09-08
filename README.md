@@ -261,7 +261,7 @@ To publish the new object immediately, invalidate that path after uploading it:
 node localfront.mjs create-invalidation EM5T9ZZLUF20OC --paths "/index.html"
 ```
 
-The next request through `http://site.local:8080/index.html` fetches the new content. Use `--paths "/*"` to invalidate the whole distribution. You can choose a shorter default TTL when creating or updating a distribution, for example `--default-ttl 300` for five-minute revalidation.
+The next request through `http://site.local:8080/index.html` fetches the new content. Use `--paths "/*"` to invalidate the whole distribution. Invalidation actions and automatic TTL revalidations are shown in the dashboard's Revalidation history. You can choose a shorter default TTL when creating or updating a distribution, for example `--default-ttl 300` for five-minute revalidation.
 
 ## Configuration (env)
 

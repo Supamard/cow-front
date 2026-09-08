@@ -59,8 +59,26 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   const health = await waitFor(`http://127.0.0.1:${adminPort}/health`, server);
   assert.equal((await health.json()).ok, true);
   const page = await fetch(`http://127.0.0.1:${adminPort}/`);
-  assert.match(await page.text(), /href="\/style\.css"/);
+  const pageText = await page.text();
+  assert.match(pageText, /href="\/style\.css"/);
+  assert.match(pageText, /Revalidation history/);
   const css = await fetch(`http://127.0.0.1:${adminPort}/style.css`);
   assert.equal(css.status, 200);
   assert.match(await css.text(), /\.top-grid/);
+  const revalidations = await fetch(`http://127.0.0.1:${adminPort}/revalidations`);
+  assert.deepEqual((await revalidations.json()).revalidations, []);
+  const created = await fetch(`http://127.0.0.1:${adminPort}/distributions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ origin: { domainName: 'http://127.0.0.1:9' } }),
+  });
+  const distribution = await created.json();
+  const invalidated = await fetch(`http://127.0.0.1:${adminPort}/distributions/${distribution.id}/invalidations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ paths: ['/index.html'] }),
+  });
+  assert.equal(invalidated.status, 201);
+  const history = await fetch(`http://127.0.0.1:${adminPort}/revalidations`);
+  assert.equal((await history.json()).revalidations[0].result, 'invalidated');
 });

@@ -1,11 +1,11 @@
-# LocalFront
+# CowFront
 
 A local, **CloudFront-like CDN emulator** that sits in front of **MinIO** (or any HTTP origin) on your machine. Same mental model as CloudFront — distributions, an ID per distribution, an origin, cache behaviors, TTLs, invalidations — but everything runs on `localhost` with zero dependencies.
 
-It's the CDN-layer companion to using MinIO as your local S3: MinIO answers the S3 API, LocalFront does the edge caching in front of it.
+It's the CDN-layer companion to using MinIO as your local S3: MinIO answers the S3 API, CowFront does the edge caching in front of it.
 
 ```
-browser ──▶ LocalFront (:8080)  ──▶  MinIO (:9000)  [bucket = origin path]
+browser ──▶ CowFront (:8080)  ──▶  MinIO (:9000)  [bucket = origin path]
              caching, TTL,              S3 objects
              compression,
              invalidation
@@ -53,10 +53,13 @@ Install the optional loopback aliases:
 npm run hosts:setup
 ```
 
-On Windows, the command automatically opens an Administrator prompt when updating the protected hosts file. Approve that prompt to add `site.local`, `api.local`, and `app.local` as aliases for `127.0.0.1`; it also flushes the DNS cache automatically. Ports are still part of the URL because hosts files do not route ports:
+Running `npm install` in the CowFront project, installing CowFront globally, or running `npm run setup` also starts this host setup automatically. On Windows, approve the Administrator prompt so the protected hosts file can be updated. The setup adds `cowfront.local`, `gh-dev.test`, `gh-dev.local`, `site.local`, `api.local`, and `app.local` as aliases for `127.0.0.1` and flushes the DNS cache automatically. Hosts files do not route ports, so a port is part of the URL for everything Caddy does not front:
 
 ```text
-http://site.local:8080  -> LocalFront
+http://cowfront.local   -> CowFront admin dashboard (via Caddy)
+http://gh-dev.test      -> the project on port 3015 (via Caddy, shared with teammates)
+http://gh-dev.local     -> the same project, this machine only
+http://site.local:8080  -> CowFront
 http://api.local:3001   -> API service
 http://app.local:3000   -> App service
 ```
@@ -100,7 +103,7 @@ The hosts file maps names to `127.0.0.1`; the port remains part of the URL.
 
 ### MinIO anonymous access FAQ
 
-**How do I make the LocalFront origin readable without authentication?**
+**How do I make the CowFront origin readable without authentication?**
 
 Set an anonymous read-only policy on the MinIO bucket prefix. Keep the bucket and prefix as variables so this works with any bucket layout:
 
@@ -144,7 +147,7 @@ curl -i -H "X-Distribution-Id: E1A2B3C4D5E6F7" http://localhost:8080/hello.txt
 curl -i http://e1a2b3c4d5e6f7.localhost:8080/hello.txt
 ```
 
-First request → `X-Cache: Miss from LocalFront`. Second → `X-Cache: Hit from LocalFront` with an `Age` header. That's the CDN cache working.
+First request → `X-Cache: Miss from CowFront`. Second → `X-Cache: Hit from CowFront` with an `Age` header. That's the CDN cache working.
 
 ## How a request maps to MinIO
 
@@ -157,7 +160,7 @@ GET http://localhost:9000/assets/img/logo.png   (MinIO path-style: /<bucket>/<ke
 
 `--origin-path` is your bucket (CloudFront calls this the *Origin Path*). The object key follows.
 
-For a MinIO bucket with an object prefix, include both values in the origin path. For example, if the bucket is `uforge-local` and the objects are under `data/site.local/`, LocalFront requests `/uforge-local/data/site.local/<object-key>` from MinIO:
+For a MinIO bucket with an object prefix, include both values in the origin path. For example, if the bucket is `uforge-local` and the objects are under `data/site.local/`, CowFront requests `/uforge-local/data/site.local/<object-key>` from MinIO:
 
 ```bash
 MINIO_BUCKET=uforge-local
@@ -168,7 +171,7 @@ node localfront.mjs create-distribution \
   --origin-path "/$MINIO_BUCKET/$MINIO_PREFIX"
 ```
 
-The bucket and prefix are only command/config values; LocalFront does not hard-code either one. To repair an existing distribution, use the same variables with `update-distribution`:
+The bucket and prefix are only command/config values; CowFront does not hard-code either one. To repair an existing distribution, use the same variables with `update-distribution`:
 
 ```bash
 node localfront.mjs update-distribution EM5T9ZZLUF20OC \
@@ -177,7 +180,7 @@ node localfront.mjs update-distribution EM5T9ZZLUF20OC \
 
 Use the MinIO API port `9000` as the origin. Port `9001` is only the MinIO web console.
 
-> MinIO note: LocalFront fetches over anonymous HTTP, so the bucket/prefix must be readable. The compose file runs `mc anonymous set download local/assets` for you. This mirrors a public origin; if you need signed access instead, that's an extension point (see below).
+> MinIO note: CowFront fetches over anonymous HTTP, so the bucket/prefix must be readable. The compose file runs `mc anonymous set download local/assets` for you. This mirrors a public origin; if you need signed access instead, that's an extension point (see below).
 
 ## Routing a request to a distribution
 
@@ -218,7 +221,7 @@ Patterns support `*` wildcards, exactly like CloudFront invalidation paths.
 
 ## Admin API
 
-Runs on `http://localhost:5744`:
+Runs on `http://cowfront.local:5744` (or `http://localhost:5744`):
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -232,11 +235,60 @@ Runs on `http://localhost:5744`:
 | GET | `/stats` | cache size + hit/miss counters |
 | GET | `/health` | liveness |
 
-Open `http://localhost:5744/` in a browser to use the dashboard for quick distribution management and cache invalidation.
+Open `http://cowfront.local/` through Caddy (or `http://localhost:5744/` directly) to use the dashboard for quick distribution management and cache invalidation.
+When a distribution uses a friendly hostname that is not mapped to the local loopback address yet, its card shows a **Map hostname** button. On Windows, clicking it may open an Administrator prompt so CowFront can update the protected hosts file; the button disappears after the alias is installed.
+
+### Portless local hostnames with Caddy
+
+Caddy owns port 80 and routes by hostname, so local URLs need no port suffix:
+
+```text
+http://cowfront.local -> 127.0.0.1:5744   CowFront's dashboard, this machine only
+http://gh-dev.test    -> 127.0.0.1:3015   shared with other machines on the LAN
+http://gh-dev.local   -> 127.0.0.1:3015   the same project, kept for this machine
+http://<this-ip>/     -> 127.0.0.1:3015   same destination, for clients with no hosts entry
+```
+
+The dashboard and the shared project sit behind one listener, so the split is enforced by a matcher rather than by the socket: `cowfront.local` answers `403` to any client whose address is not `127.0.0.1` or `::1`. `auto_https off` means Caddy makes no ACME or certificate requests, so it sends nothing out of the machine.
+
+Set `LOCALFRONT_CADDY_PORT` to move Caddy off port 80 (the `Caddyfile` and the `caddy:*` scripts both read that variable). Windows Firewall will ask to allow Caddy on first run: allow **Private** networks so teammates can reach `gh-dev.local`, and deny **Public**.
+
+Install Caddy per-user with Windows Package Manager, then validate and start it:
+
+```powershell
+npm run caddy:install
+npm run caddy:check
+npm run caddy:activate
+```
+
+Only one program can own port 80. On this machine it was held by a Windows portproxy rule (`0.0.0.0:80 -> 127.0.0.1:3015`), run by the IP Helper service — which is why a process listing blames `svchost` rather than naming the real owner. The Windows-only `caddy:activate` command validates the configuration, requests Administrator access, installs the host aliases, removes that portproxy rule, and starts Caddy in its place with logs in `.caddy/`. Caddy's `gh-dev.local` and catch-all routes preserve what the rule used to do, and the command restores the original rule if Caddy fails to start. Use these commands afterward:
+
+```powershell
+npm run caddy:reload
+npm run caddy:stop
+```
+
+Creating, updating, or deleting a CowFront distribution automatically regenerates its hostname-specific Caddy route and reloads Caddy. The dashboard's **Map hostname** action handles the matching hosts-file alias, so a new friendly hostname works without manually editing the Caddyfile. CowFront generates exact hostname routes instead of a broad `*.local` rule, preserving routes owned by other tools.
+
+### Sharing the project with teammates
+
+The shared name is **`gh-dev.test`**. `.test` is reserved by RFC 6761 and never resolves on the public internet, which makes it safe for a local tool. `gh-dev.local` still works on this machine, but do not hand it to teammates: `.local` is the mDNS namespace (RFC 6762) and collides with Bonjour on macOS.
+
+A hostname only reaches Caddy if it resolves on the *visitor's* machine — this is DNS, not something Caddy can configure. Print the instructions to send them:
+
+```bash
+npm run share
+```
+
+That reports this machine's LAN address, checks that Caddy and the project are actually running, and prints a copy-pasteable hosts-file line for Windows and macOS/Linux. Teammates who would rather not edit a file can use the bare IP, which the catch-all route serves.
+
+If a teammate sees `DNS_PROBE_FINISHED_NXDOMAIN`, the name did not resolve and no packet ever reached this machine — they are missing the hosts entry. A firewall or port problem looks different: `ERR_CONNECTION_TIMED_OUT` or `ERR_CONNECTION_REFUSED`.
+
+**Hosts entries are pinned to an IP.** If this machine's address is from DHCP it can change, and every teammate's entry breaks at once. Re-run `npm run share` and send the new line, or ask whoever runs the network for a DHCP reservation. A DNS record on the network's own resolver is the durable fix once one is available — Caddy then needs only the new hostname added to its site block.
 
 ## CloudFront concept mapping
 
-| CloudFront | LocalFront |
+| CloudFront | CowFront |
 |---|---|
 | Distribution | entry in `distributions.json` |
 | Distribution ID | `E` + 13 chars (generated) |
@@ -255,13 +307,13 @@ Open `http://localhost:5744/` in a browser to use the dashboard for quick distri
 - Honors origin `Cache-Control` (`s-maxage` > `max-age`) and `Expires`, clamped to min/max TTL.
 - Falls back to **Default TTL** when the origin sends no caching headers (just like CloudFront).
 - Respects `no-store` / `private` (never cached).
-- **Stale revalidation:** when a cached object expires, LocalFront revalidates with `If-None-Match` / `If-Modified-Since`; a `304` refreshes the TTL and serves the cached body as `X-Cache: RefreshHit`.
+- **Stale revalidation:** when a cached object expires, CowFront revalidates with `If-None-Match` / `If-Modified-Since`; a `304` refreshes the TTL and serves the cached body as `X-Cache: RefreshHit`.
 - Caches `GET`/`HEAD` by default; `Range` requests pass through uncached.
 - In-memory LRU cache (default 5000 entries, `LOCALFRONT_CACHE_MAX`).
 
 ### Content update cycle
 
-When you overwrite an existing object such as `index.html` in MinIO, LocalFront keeps serving the cached response until its TTL expires, just like a CloudFront distribution. After expiry, it revalidates the object with MinIO: an unchanged object returns `X-Cache: RefreshHit`, while a changed object is fetched and returned as `X-Cache: Miss`.
+When you overwrite an existing object such as `index.html` in MinIO, CowFront keeps serving the cached response until its TTL expires, just like a CloudFront distribution. After expiry, it revalidates the object with MinIO: an unchanged object returns `X-Cache: RefreshHit`, while a changed object is fetched and returned as `X-Cache: Miss`.
 
 To publish the new object immediately, invalidate that path after uploading it:
 
@@ -279,6 +331,7 @@ The next request through `http://site.local:8080/index.html` fetches the new con
 | `LOCALFRONT_ADMIN_PORT` | `5744` | admin API port |
 | `LOCALFRONT_CONFIG` | `./distributions.json` | distributions file |
 | `LOCALFRONT_CACHE_MAX` | `5000` | max cached objects (LRU) |
+| `LOCALFRONT_CADDY_PORT` | `80` | Caddy listener port for the local hostnames |
 
 ## Not included (intentional extension points)
 

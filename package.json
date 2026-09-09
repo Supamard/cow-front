@@ -18,26 +18,35 @@
   },
   "scripts": {
     "test": "node --test",
+    "postinstall": "node scripts/install-hosts.mjs",
     "prepublishOnly": "npm test && npm pack --dry-run",
     "serve": "node localfront.mjs serve",
+    "setup": "node scripts/setup-hosts.mjs",
+    "caddy:install": "node scripts/caddy.mjs install",
+    "caddy:check": "node scripts/caddy.mjs check",
+    "caddy:activate": "node scripts/caddy.mjs activate",
+    "caddy:run": "node scripts/caddy.mjs run",
+    "caddy:reload": "node scripts/caddy.mjs reload",
+    "caddy:stop": "node scripts/caddy.mjs stop",
     "minio:up": "node scripts/minio-up.mjs",
     "minio:public": "node scripts/minio-public.mjs",
     "minio:down": "docker compose down",
-    "hosts:setup": "node scripts/setup-hosts.mjs"
+    "hosts:setup": "node scripts/setup-hosts.mjs",
+    "share": "node scripts/share.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "license": "MIT",
   "files": [
-    "README.md",
     "LICENSE",
+    "README.md",
+    "assets",
     "docker-compose.yml",
     "fake-origin.mjs",
     "localfront.mjs",
-    "style.css",
-    "assets",
     "scripts",
+    "style.css",
     "tests"
   ],
   "repository": {

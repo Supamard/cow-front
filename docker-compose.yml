@@ -1,9 +1,9 @@
 # MinIO stand-in for S3, plus a one-shot job that creates/configures a public bucket.
 # Start it with:  docker compose up -d
 # Console:        http://localhost:9001  (user: minioadmin / pass: minioadmin)
-# S3 endpoint:    http://localhost:9000  <-- point a LocalFront distribution here
+# S3 endpoint:    http://localhost:9000  <-- point a CowFront distribution here
 #
-# LocalFront itself runs on the host (node localfront.mjs serve), NOT in compose,
+# CowFront itself runs on the host (node localfront.mjs serve), NOT in compose,
 # so it can bind localhost and reach MinIO at http://localhost:9000.
 
 services:
@@ -36,7 +36,7 @@ services:
         mc mb -p local/$${MINIO_BUCKET:-assets}
         mc anonymous set download local/$${MINIO_BUCKET:-assets}/$${MINIO_PREFIX:-}
         echo 'seeding a sample object...'
-        echo 'hello from minio via LocalFront' | mc pipe local/assets/hello.txt
+        echo 'hello from minio via CowFront' | mc pipe local/assets/hello.txt
         echo "done. local/$${MINIO_BUCKET:-assets}/$${MINIO_PREFIX:-} is public-read (download)."
         exit 0
 

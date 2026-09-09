@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -40,11 +40,24 @@ test('CLI help is available', () => {
 test('serve exposes the admin page and package stylesheet', async (t) => {
   const tempDir = await mkdtemp(path.join(root, '.tmp-test-'));
   const configPath = path.join(tempDir, 'distributions.json');
+  const hostsPath = path.join(tempDir, 'hosts');
+  const caddyfilePath = path.join(tempDir, 'Caddyfile');
+  await writeFile(hostsPath, '127.0.0.1 localhost\n\n# LocalFront host aliases - managed block\n127.0.0.1 legacy.local\n# End LocalFront host aliases\n', 'utf8');
+  await writeFile(caddyfilePath, '# CowFront distribution routes - managed block\n# End CowFront distribution routes\n', 'utf8');
   const adminPort = await freePort();
   const proxyPort = await freePort();
   const server = spawn(process.execPath, [path.join(root, 'localfront.mjs'), 'serve'], {
     cwd: tempDir,
-    env: { ...process.env, LOCALFRONT_CONFIG: configPath, LOCALFRONT_ADMIN_PORT: String(adminPort), LOCALFRONT_PORT: String(proxyPort) },
+    env: {
+      ...process.env,
+      LOCALFRONT_CONFIG: configPath,
+      LOCALFRONT_ADMIN_PORT: String(adminPort),
+      LOCALFRONT_PORT: String(proxyPort),
+      LOCALFRONT_HOSTS_PATH: hostsPath,
+      LOCALFRONT_CADDYFILE: caddyfilePath,
+      LOCALFRONT_SKIP_DNS_FLUSH: '1',
+      LOCALFRONT_SKIP_CADDY_RELOAD: '1',
+    },
     stdio: 'ignore',
   });
   t.after(async () => {
@@ -65,6 +78,8 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   assert.match(pageText, /href="\/favicon\.ico"/);
   assert.match(pageText, /href="\/style\.css"/);
   assert.match(pageText, /Revalidation history/);
+  assert.match(pageText, /Map hostname/);
+  assert.match(pageText, /http:\/\/cowfront\.local:/);
   const css = await fetch(`http://127.0.0.1:${adminPort}/style.css`);
   assert.equal(css.status, 200);
   assert.match(await css.text(), /\.top-grid/);
@@ -75,9 +90,40 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   const created = await fetch(`http://127.0.0.1:${adminPort}/distributions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ origin: { domainName: 'http://127.0.0.1:9' } }),
+    body: JSON.stringify({ domainName: 'shop.local', origin: { domainName: 'http://127.0.0.1:9' } }),
   });
   const distribution = await created.json();
+  assert.match(await readFile(caddyfilePath, 'utf8'), /http:\/\/shop\.local[\s\S]*127\.0\.0\.1:/);
+  assert.match(await readFile(caddyfilePath, 'utf8'), /shop\.local[\s\S]*@remote not remote_ip 127\.0\.0\.1 ::1/);
+  const beforeMapping = await fetch(`http://127.0.0.1:${adminPort}/host-mappings`);
+  assert.equal((await beforeMapping.json()).mappings['shop.local'].mapped, false);
+  const mapped = await fetch(`http://127.0.0.1:${adminPort}/host-mappings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hostname: 'shop.local' }),
+  });
+  assert.equal(mapped.status, 201);
+  assert.match(await readFile(hostsPath, 'utf8'), /127\.0\.0\.1 .*shop\.local/);
+  const secondCreated = await fetch(`http://127.0.0.1:${adminPort}/distributions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ domainName: 'catalog.local', origin: { domainName: 'http://127.0.0.1:9' } }),
+  });
+  assert.equal(secondCreated.status, 201);
+  const secondMapping = await fetch(`http://127.0.0.1:${adminPort}/host-mappings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hostname: 'catalog.local' }),
+  });
+  assert.equal(secondMapping.status, 201);
+  const hostsText = await readFile(hostsPath, 'utf8');
+  assert.match(hostsText, /cowfront\.local/);
+  assert.match(hostsText, /legacy\.local/);
+  assert.doesNotMatch(hostsText, /# LocalFront host aliases/);
+  assert.match(hostsText, /shop\.local/);
+  assert.match(hostsText, /catalog\.local/);
+  const afterMapping = await fetch(`http://127.0.0.1:${adminPort}/host-mappings`);
+  assert.equal((await afterMapping.json()).mappings['shop.local'].mapped, true);
   const invalidated = await fetch(`http://127.0.0.1:${adminPort}/distributions/${distribution.id}/invalidations`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

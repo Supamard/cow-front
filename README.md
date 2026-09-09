@@ -26,6 +26,14 @@ npm run minio:up
 
 The startup script scans ports `9000` and `9001` first. If MinIO is already listening, it skips the Compose launch instead of failing. If MinIO is not found, it asks whether Docker Compose should start it. Use `npm run minio:up -- --yes` to start without prompting.
 
+To make every object under a bucket prefix anonymously downloadable, run:
+
+```bash
+npm run minio:public -- --bucket uforge-local --prefix data
+```
+
+This applies the read-only download policy to `local/uforge-local/data/*`. The bucket is never hard-coded; use any bucket and prefix you need. The equivalent environment-variable form is `MINIO_BUCKET=uforge-local MINIO_PREFIX=data npm run minio:up -- --yes`, which applies the policy during Compose startup.
+
 **2. Create a distribution** pointing at the MinIO bucket:
 
 ```bash
@@ -45,7 +53,7 @@ Install the optional loopback aliases:
 npm run hosts:setup
 ```
 
-On Windows, run the terminal as Administrator because updating the hosts file requires elevation. The command adds `site.local`, `api.local`, and `app.local` as aliases for `127.0.0.1`. Ports are still part of the URL because hosts files do not route ports:
+On Windows, the command automatically opens an Administrator prompt when updating the protected hosts file. Approve that prompt to add `site.local`, `api.local`, and `app.local` as aliases for `127.0.0.1`; it also flushes the DNS cache automatically. Ports are still part of the URL because hosts files do not route ports:
 
 ```text
 http://site.local:8080  -> LocalFront
@@ -62,7 +70,7 @@ node localfront.mjs create-distribution --domain site.local \
 
 Remove the aliases later with `npm run hosts:setup -- --remove`.
 
-Add your own aliases by passing one or more `--map` options. Both `name.local=port` and `name.local:port` are accepted:
+Add your own aliases by passing one or more `--map` options. Both `name.local=port` and `name.local:port` are accepted. The aliases are written and DNS is flushed automatically:
 
 ```bash
 npm run hosts:setup -- --map admin.local=5744 --map shop.local=4173

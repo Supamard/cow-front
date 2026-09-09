@@ -454,6 +454,19 @@ async function handleAdmin(req, res, state) {
     if (!existsSync(cssPath)) return sendPlain(res, 404, 'style.css not found\n');
     return sendCss(res, 200, readFileSync(cssPath, 'utf8'));
   }
+  const brandAssets = {
+    '/favicon.ico': ['assets/cowfront-logo/favicon/favicon.ico', 'image/x-icon'],
+    '/apple-touch-icon.png': ['assets/cowfront-logo/favicon/apple-touch-icon.png', 'image/png'],
+    '/cowfront-logo.png': ['assets/cowfront-logo/cowfront-horizontal.png', 'image/png'],
+  };
+  if (method === 'GET' && brandAssets[url.pathname]) {
+    const [asset, contentType] = brandAssets[url.pathname];
+    const assetPath = path.join(APP_ROOT, asset);
+    if (!existsSync(assetPath)) return sendPlain(res, 404, 'brand asset not found\n');
+    const body = readFileSync(assetPath);
+    res.writeHead(200, { 'content-type': contentType, 'content-length': body.length, 'cache-control': 'public, max-age=86400' });
+    return res.end(body);
+  }
 
   if (url.pathname === '/health') return sendJson(res, 200, { ok: true, service: 'localfront' });
 
@@ -528,7 +541,9 @@ function adminDashboardHtml() {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>LocalFront Admin</title>
+  <title>CowFront Admin</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="stylesheet" href="/style.css" />
   <style>
     :root {
@@ -845,7 +860,10 @@ function adminDashboardHtml() {
     <section class="top-grid">
     <section class="hero">
       <div class="title">
-        <div class="eyebrow">LocalFront Admin</div>
+        <div class="brand-lockup">
+          <img src="/cowfront-logo.png" alt="CowFront" />
+        </div>
+        <div class="eyebrow">CowFront Admin</div>
         <h1>Control your local CDN from one small dashboard.</h1>
         <p class="sub">
           Create distributions, watch cache health, and invalidate objects without leaving the browser.
@@ -963,7 +981,7 @@ function adminDashboardHtml() {
       </div>
     </section>
     <div class="footer-note">
-      Admin UI served by LocalFront. The proxy endpoint remains available on port ${PROXY_PORT}.
+      CowFront admin console. The proxy endpoint remains available on port ${PROXY_PORT}.
     </div>
   </div>
 

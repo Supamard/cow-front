@@ -60,11 +60,16 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   assert.equal((await health.json()).ok, true);
   const page = await fetch(`http://127.0.0.1:${adminPort}/`);
   const pageText = await page.text();
+  assert.match(pageText, /<title>CowFront Admin<\/title>/);
+  assert.match(pageText, /src="\/cowfront-logo\.png"/);
+  assert.match(pageText, /href="\/favicon\.ico"/);
   assert.match(pageText, /href="\/style\.css"/);
   assert.match(pageText, /Revalidation history/);
   const css = await fetch(`http://127.0.0.1:${adminPort}/style.css`);
   assert.equal(css.status, 200);
   assert.match(await css.text(), /\.top-grid/);
+  assert.equal((await fetch('http://127.0.0.1:' + adminPort + '/favicon.ico')).status, 200);
+  assert.equal((await fetch('http://127.0.0.1:' + adminPort + '/cowfront-logo.png')).status, 200);
   const revalidations = await fetch(`http://127.0.0.1:${adminPort}/revalidations`);
   assert.deepEqual((await revalidations.json()).revalidations, []);
   const created = await fetch(`http://127.0.0.1:${adminPort}/distributions`, {

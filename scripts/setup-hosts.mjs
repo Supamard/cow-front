@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const markerStart = '# LocalFront host aliases - managed block';
 const markerEnd = '# End LocalFront host aliases';
@@ -15,6 +17,20 @@ const defaultHostsPath = process.platform === 'win32'
   : '/etc/hosts';
 const hostsPath = process.env.LOCALFRONT_HOSTS_PATH || defaultHostsPath;
 const remove = process.argv.includes('--remove');
+const elevated = process.argv.includes('--elevated');
+
+function psQuote(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function rerunAsAdministrator() {
+  const scriptPath = fileURLToPath(import.meta.url);
+  const args = process.argv.slice(2).filter((arg) => arg !== '--elevated');
+  const argumentList = [scriptPath, ...args, '--elevated'].map(psQuote).join(',');
+  const command = `$p = Start-Process -FilePath ${psQuote(process.execPath)} -ArgumentList @(${argumentList}) -Verb RunAs -Wait -PassThru; exit $p.ExitCode`;
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', command], { stdio: 'inherit' });
+  return result.status ?? 1;
+}
 
 function customMappings() {
   const mappings = [];
@@ -50,8 +66,16 @@ try {
     console.log('Use these URLs:');
     for (const { hostname, port } of mappings) console.log(`  http://${hostname}:${port}`);
   }
+  if (process.platform === 'win32' && !process.env.LOCALFRONT_SKIP_DNS_FLUSH) {
+    const dns = spawnSync('ipconfig', ['/flushdns'], { stdio: 'inherit' });
+    if (dns.status !== 0) console.warn('Could not flush the DNS cache automatically. Run `ipconfig /flushdns` manually.');
+  }
 } catch (error) {
+  if (process.platform === 'win32' && error.code === 'EPERM' && !elevated && !process.env.LOCALFRONT_HOSTS_PATH) {
+    console.log('Windows requires Administrator access to update the hosts file. Opening an elevated setup prompt...');
+    process.exit(rerunAsAdministrator());
+  }
   console.error(`Could not update ${hostsPath}: ${error.message}`);
-  console.error('On Windows, rerun this command from an Administrator terminal.');
+  console.error('On Windows, approve the Administrator prompt or run this command from an Administrator terminal.');
   process.exit(1);
 }

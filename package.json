@@ -21,6 +21,7 @@
     "prepublishOnly": "npm test && npm pack --dry-run",
     "serve": "node localfront.mjs serve",
     "minio:up": "node scripts/minio-up.mjs",
+    "minio:public": "node scripts/minio-public.mjs",
     "minio:down": "docker compose down",
     "hosts:setup": "node scripts/setup-hosts.mjs"
   },
@@ -35,6 +36,7 @@
     "fake-origin.mjs",
     "localfront.mjs",
     "style.css",
+    "assets",
     "scripts",
     "tests"
   ],

@@ -206,9 +206,120 @@ node localfront.mjs create-invalidation <id> --paths "/*" ["/img/*" ...]
 node localfront.mjs stats
 ```
 
-**Options** (create/update): `--origin`, `--origin-path`, `--default-ttl`, `--min-ttl`, `--max-ttl`, `--no-compress`, `--forward-query`, `--comment`, `--id`.
+**Options** (create/update): `--origin`, `--origin-path`, `--default-ttl`, `--min-ttl`, `--max-ttl`, `--no-compress`, `--forward-query`, `--viewer-request-function`, `--viewer-response-function`, `--comment`, `--id`.
 
 The CLI talks to the running server's admin API when it's up; otherwise it edits `distributions.json` directly (so you can pre-provision before starting). The server watches that file and hot-reloads.
+
+## CloudFront Functions
+
+CowFront can run AWS-style **viewer request** and **viewer response** JavaScript functions on its local CDN path. Point a distribution at the same source files you plan to paste or deploy to CloudFront:
+
+The dashboard at `http://cowfront.local/` has a **Test CloudFront function** form. Select a distribution and event type, upload a `.js` file or paste the source directly, then choose **Save & associate**. Enter a path and choose **Run through local CDN** to see the status, headers, and response body without leaving the dashboard. The built-in **Load remove .html example** button provides an immediately runnable sample.
+
+```powershell
+node localfront.mjs update-distribution EM5T9ZZLUF20OC `
+  --viewer-request-function ./functions/viewer-request.js `
+  --viewer-response-function ./functions/viewer-response.js
+
+node localfront.mjs serve
+curl.exe -i http://site.local/
+```
+
+Paths can be absolute or relative to `distributions.json`. Function source is read on every invocation, so saving the file and refreshing the request is enough; the CowFront process does not need to restart. Example functions are in `examples/cloudfront-functions/`.
+
+The equivalent configuration is:
+
+```json
+{
+  "defaultCacheBehavior": {
+    "functionAssociations": {
+      "viewerRequest": "./functions/viewer-request.js",
+      "viewerResponse": "./functions/viewer-response.js"
+    }
+  }
+}
+```
+
+The event uses CloudFront Functions event version `1.0`, including `context`, `viewer`, parsed `querystring`, lowercase `headers`, and separate `cookies`. A viewer-request handler can return a modified request or generate a response. A viewer-response handler runs for cache hits and origin responses and can change status, headers, cookies, or replace the body.
+
+```js
+function handler(event) {
+  var request = event.request;
+  request.uri = request.uri.endsWith('/') ? request.uri + 'index.html' : request.uri;
+  request.headers['x-tested-locally'] = { value: 'true' };
+  return request;
+}
+```
+
+Remove an association with `--no-viewer-request-function` or `--no-viewer-response-function`.
+
+### Clean URLs: redirect `.html` paths
+
+The copy-ready example at `examples/cloudfront-functions/remove-html-extension.js` redirects `/about.html` to `/about`, then internally maps the clean `/about` request back to the `/about.html` origin object. Directory paths such as `/docs/` map to `/docs/index.html`. Query parameters, including duplicates, are preserved. Associate it and test without following the redirect:
+
+```powershell
+node localfront.mjs update-distribution EM5T9ZZLUF20OC `
+  --viewer-request-function ./examples/cloudfront-functions/remove-html-extension.js
+
+curl.exe -i "http://site.local/about.html?lang=en"
+```
+
+Expected result:
+
+```text
+HTTP/1.1 301 Moved Permanently
+Location: /about?lang=en
+```
+
+Copy and paste this complete function into either a local `.js` file or the AWS CloudFront Functions editor:
+
+```js
+function handler(event) {
+  var request = event.request;
+
+  // Redirect the old public URL: /about.html -> /about
+  if (/\.html$/i.test(request.uri)) {
+    var location = request.uri.slice(0, -5);
+    var query = [];
+
+    // Keep query parameters, including duplicate values.
+    for (var name in request.querystring) {
+      var item = request.querystring[name];
+      var values = item.multiValue || [item];
+
+      for (var i = 0; i < values.length; i++) {
+        query.push(encodeURIComponent(name) + '=' + encodeURIComponent(values[i].value));
+      }
+    }
+
+    if (query.length) {
+      location += '?' + query.join('&');
+    }
+
+    return {
+      statusCode: 301,
+      statusDescription: 'Moved Permanently',
+      headers: {
+        location: { value: location },
+        'cache-control': { value: 'no-store' }
+      }
+    };
+  }
+
+  // Keep the browser URL clean while fetching the real .html object.
+  if (request.uri === '/') {
+    request.uri = '/index.html';
+  } else if (request.uri.endsWith('/')) {
+    request.uri += 'index.html';
+  } else if (!/\.[^/]+$/.test(request.uri)) {
+    request.uri += '.html';
+  }
+
+  return request;
+}
+```
+
+Compatibility is intentionally focused on CloudFront Functions' HTTP lifecycle. The local runtime accepts synchronous and async handlers and blocks direct globals for network, filesystem, environment variables, and timers. It does not emulate CloudFront KeyValueStore, AWS compute-utilization scoring, exact runtime quotas, or every runtime 2.0 built-in. Node's `vm` is an isolation aid, not a security boundary, so only run code you trust.
 
 ## Invalidations
 
@@ -231,6 +342,8 @@ Runs on `http://cowfront.local:5744` (or `http://localhost:5744`):
 | GET | `/distributions/:id` | get |
 | PUT | `/distributions/:id` | update |
 | DELETE | `/distributions/:id` | delete |
+| POST | `/distributions/:id/functions` | save pasted/uploaded code and associate it |
+| POST | `/distributions/:id/function-test` | run a path through the local CDN and return the result |
 | POST | `/distributions/:id/invalidations` | `{ "paths": ["/*"] }` |
 | GET | `/stats` | cache size + hit/miss counters |
 | GET | `/health` | liveness |
@@ -299,6 +412,7 @@ If a teammate sees `DNS_PROBE_FINISHED_NXDOMAIN`, the name did not resolve and n
 | Compress objects automatically | `compress` (gzip/br on the fly) |
 | Cache key: query strings | `forwardQueryString` |
 | Cache key: headers | `cacheKeyHeaders` |
+| Function associations | `defaultCacheBehavior.functionAssociations.{viewerRequest,viewerResponse}` |
 | Invalidations | `create-invalidation` / admin endpoint |
 | `X-Cache`, `Age`, `Via`, `X-Amz-Cf-Id` | emulated response headers |
 
@@ -331,6 +445,7 @@ The next request through `http://site.local:8080/index.html` fetches the new con
 | `LOCALFRONT_ADMIN_PORT` | `5744` | admin API port |
 | `LOCALFRONT_CONFIG` | `./distributions.json` | distributions file |
 | `LOCALFRONT_CACHE_MAX` | `5000` | max cached objects (LRU) |
+| `LOCALFRONT_FUNCTION_TIMEOUT_MS` | `100` | local function execution timeout |
 | `LOCALFRONT_CADDY_PORT` | `80` | Caddy listener port for the local hostnames |
 
 ## Not included (intentional extension points)
@@ -338,7 +453,7 @@ The next request through `http://site.local:8080/index.html` fetches the new con
 This emulates the **caching CDN + control plane**, which is the 90% case for local dev. It does *not* implement, but is structured to let you add:
 
 - **Signed URLs / signed cookies** — verify in `handleProxy` before the cache lookup.
-- **CloudFront Functions / Lambda@Edge** — a viewer-request hook is a natural insert in `handleProxy` before building the origin URL; keep user code sandboxed if you go there.
+- **Lambda@Edge** — CloudFront Functions viewer hooks are supported; the Node.js Lambda@Edge event model and origin-facing triggers are not.
 - **Origin Access Control (OAC)** — swap the plain `fetch` in `handleProxy` for a SigV4-signed request to a private MinIO bucket.
 - **Multiple cache behaviors per path pattern** — `defaultCacheBehavior` is a single behavior today; add an ordered `cacheBehaviors[]` matched by path.
 

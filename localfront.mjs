@@ -15,13 +15,15 @@
  */
 
 import http from 'node:http';
-import { readFileSync, writeFileSync, existsSync, watch } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, watch } from 'node:fs';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+import * as querystring from 'node:querystring';
 
 const gzip = promisify(zlib.gzip);
 const brotli = promisify(zlib.brotliCompress);
@@ -31,6 +33,7 @@ const CONFIG_PATH = process.env.LOCALFRONT_CONFIG || path.resolve(process.cwd(),
 const PROXY_PORT = parseInt(process.env.LOCALFRONT_PORT || '8080', 10);
 const ADMIN_PORT = parseInt(process.env.LOCALFRONT_ADMIN_PORT || '5744', 10);
 const CACHE_MAX = parseInt(process.env.LOCALFRONT_CACHE_MAX || '5000', 10);
+const FUNCTION_TIMEOUT_MS = parseInt(process.env.LOCALFRONT_FUNCTION_TIMEOUT_MS || '100', 10);
 const HOSTS_PATH = process.env.LOCALFRONT_HOSTS_PATH || (process.platform === 'win32'
   ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
   : '/etc/hosts');
@@ -163,6 +166,32 @@ function saveConfig(cfg) {
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
 }
 
+function saveFunctionSource(distributionId, eventType, name, code) {
+  if (!['viewerRequest', 'viewerResponse'].includes(eventType)) {
+    throw new Error('eventType must be viewerRequest or viewerResponse');
+  }
+  if (typeof code !== 'string' || !code.trim()) throw new Error('function code is required');
+  if (Buffer.byteLength(code) > 1024 * 1024) throw new Error('function code must be 1 MB or smaller');
+  if (!/\b(?:async\s+)?function\s+handler\s*\(/.test(code)) {
+    throw new Error('function code must declare function handler(event)');
+  }
+  if (eventType === 'viewerResponse' && /\breturn\s+request\s*;/.test(code) && !/\bevent\.response\b/.test(code)) {
+    throw new Error('this code reads event.request but not event.response; associate it as a viewer-request function');
+  }
+  try { new vm.Script(code, { filename: name || 'cloudfront-function.js' }); }
+  catch (error) { throw new Error(`function syntax error: ${error.message}`); }
+
+  const safeName = path.basename(String(name || `${eventType}.js`))
+    .replace(/[^a-z0-9._-]+/gi, '-')
+    .replace(/^-+|-+$/g, '') || `${eventType}.js`;
+  const filename = `${distributionId}-${safeName.endsWith('.js') ? safeName : `${safeName}.js`}`;
+  const directory = path.join(path.dirname(CONFIG_PATH), '.localfront-functions');
+  mkdirSync(directory, { recursive: true });
+  const destination = path.join(directory, filename);
+  writeFileSync(destination, code, 'utf8');
+  return './' + path.relative(path.dirname(CONFIG_PATH), destination).replaceAll('\\', '/');
+}
+
 function normalizeOriginPath(value) {
   let originPath = String(value || '').trim().replaceAll('\\', '/');
   // Git Bash rewrites CLI values such as /assets to <git-install>/assets on Windows.
@@ -181,6 +210,7 @@ function normalizeDistribution(input) {
   }
   const id = input.id || genId();
   const b = input.defaultCacheBehavior || {};
+  const functions = b.functionAssociations || {};
   return {
     id,
     comment: input.comment || '',
@@ -199,8 +229,226 @@ function normalizeDistribution(input) {
       forwardQueryString: !!b.forwardQueryString,
       cachedMethods: b.cachedMethods || ['GET', 'HEAD'],
       cacheKeyHeaders: b.cacheKeyHeaders || [],
+      functionAssociations: {
+        viewerRequest: functions.viewerRequest ? String(functions.viewerRequest) : '',
+        viewerResponse: functions.viewerResponse ? String(functions.viewerResponse) : '',
+      },
     },
     createdAt: input.createdAt || new Date().toISOString(),
+  };
+}
+
+// ----------------------------------------------------------------------------- CloudFront Functions
+function functionFile(file) {
+  return path.isAbsolute(file) ? file : path.resolve(path.dirname(CONFIG_PATH), file);
+}
+
+function eventHeadersFromRaw(rawHeaders) {
+  const grouped = new Map();
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    const name = String(rawHeaders[i]).toLowerCase();
+    if (name === 'cookie') continue;
+    const values = grouped.get(name) || [];
+    values.push(String(rawHeaders[i + 1]));
+    grouped.set(name, values);
+  }
+  const result = {};
+  for (const [name, values] of grouped) {
+    result[name] = { value: values[0] };
+    if (values.length > 1) result[name].multiValue = values.map((value) => ({ value }));
+  }
+  return result;
+}
+
+function eventCookies(cookieHeaders = []) {
+  const grouped = new Map();
+  for (const line of cookieHeaders) {
+    for (const part of String(line).split(';')) {
+      const separator = part.indexOf('=');
+      const name = (separator === -1 ? part : part.slice(0, separator)).trim();
+      if (!name) continue;
+      const value = separator === -1 ? '' : part.slice(separator + 1).trim();
+      const values = grouped.get(name) || [];
+      values.push(value);
+      grouped.set(name, values);
+    }
+  }
+  const result = {};
+  for (const [name, values] of grouped) {
+    result[name] = { value: values[0] };
+    if (values.length > 1) result[name].multiValue = values.map((value) => ({ value }));
+  }
+  return result;
+}
+
+function eventQuery(searchParams) {
+  const grouped = new Map();
+  for (const [name, value] of searchParams) {
+    const values = grouped.get(name) || [];
+    values.push(value);
+    grouped.set(name, values);
+  }
+  const result = {};
+  for (const [name, values] of grouped) {
+    result[name] = { value: values[0] };
+    if (values.length > 1) result[name].multiValue = values.map((value) => ({ value }));
+  }
+  return result;
+}
+
+function valuesFromEventField(field = {}) {
+  if (Array.isArray(field.multiValue)) return field.multiValue.map((item) => String(item.value ?? ''));
+  return [String(field.value ?? '')];
+}
+
+function queryFromEvent(querystring) {
+  if (typeof querystring === 'string') return querystring ? `?${querystring.replace(/^\?/, '')}` : '';
+  const params = new URLSearchParams();
+  for (const [name, field] of Object.entries(querystring || {})) {
+    for (const value of valuesFromEventField(field)) params.append(name, value);
+  }
+  const value = params.toString();
+  return value ? `?${value}` : '';
+}
+
+function plainHeadersFromEvent(headers = {}) {
+  const result = {};
+  for (const [name, field] of Object.entries(headers)) {
+    if (name !== name.toLowerCase()) throw new Error(`header names must be lowercase: ${name}`);
+    const values = valuesFromEventField(field);
+    result[name] = values.length === 1 ? values[0] : values.join(', ');
+  }
+  return result;
+}
+
+function cookieHeaderFromEvent(cookies = {}) {
+  const pairs = [];
+  for (const [name, field] of Object.entries(cookies)) {
+    for (const value of valuesFromEventField(field)) pairs.push(`${name}=${value}`);
+  }
+  return pairs.join('; ');
+}
+
+function setCookieHeadersFromEvent(cookies = {}) {
+  const values = [];
+  for (const [name, field] of Object.entries(cookies)) {
+    const items = Array.isArray(field.multiValue) ? field.multiValue : [field];
+    for (const item of items) {
+      values.push(`${name}=${String(item.value ?? '')}${item.attributes ? `; ${item.attributes}` : ''}`);
+    }
+  }
+  return values;
+}
+
+function functionRequest(req, urlObj) {
+  const cookieHeaders = [];
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    if (String(req.rawHeaders[i]).toLowerCase() === 'cookie') cookieHeaders.push(req.rawHeaders[i + 1]);
+  }
+  return {
+    method: req.method,
+    uri: urlObj.pathname,
+    querystring: eventQuery(urlObj.searchParams),
+    headers: eventHeadersFromRaw(req.rawHeaders),
+    cookies: eventCookies(cookieHeaders),
+  };
+}
+
+function eventHeadersFromPlain(headers = {}) {
+  const result = {};
+  for (const [name, rawValue] of Object.entries(headers)) {
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+    result[name.toLowerCase()] = { value: String(values[0] ?? '') };
+    if (values.length > 1) result[name.toLowerCase()].multiValue = values.map((value) => ({ value: String(value) }));
+  }
+  return result;
+}
+
+function functionResponse(entry) {
+  const headers = { ...entry.headers };
+  const setCookies = headers['set-cookie'];
+  delete headers['set-cookie'];
+  const cookies = {};
+  for (const line of Array.isArray(setCookies) ? setCookies : (setCookies ? [setCookies] : [])) {
+    const [pair, ...attributes] = String(line).split(';');
+    const separator = pair.indexOf('=');
+    if (separator === -1) continue;
+    const name = pair.slice(0, separator).trim();
+    const item = { value: pair.slice(separator + 1).trim() };
+    if (attributes.length) item.attributes = attributes.join(';').trim();
+    if (!cookies[name]) cookies[name] = item;
+    else {
+      if (!cookies[name].multiValue) cookies[name].multiValue = [{ ...cookies[name] }];
+      cookies[name].multiValue.push(item);
+    }
+  }
+  return {
+    statusCode: entry.status,
+    statusDescription: http.STATUS_CODES[entry.status] || '',
+    headers: eventHeadersFromPlain(headers),
+    cookies,
+  };
+}
+
+function bodyFromFunction(body, fallback) {
+  if (body === undefined) return fallback;
+  if (typeof body === 'string') return Buffer.from(body);
+  if (!body || typeof body !== 'object') throw new Error('response.body must be a string or { encoding, data }');
+  if (body.encoding === 'base64') return Buffer.from(String(body.data || ''), 'base64');
+  if (body.encoding === undefined || body.encoding === 'text') return Buffer.from(String(body.data || ''));
+  throw new Error(`unsupported response body encoding: ${body.encoding}`);
+}
+
+async function runCloudFrontFunction(file, event) {
+  const resolved = functionFile(file);
+  let source;
+  try { source = readFileSync(resolved, 'utf8'); }
+  catch (error) { throw new Error(`${file}: ${error.message}`); }
+
+  const sandbox = {
+    __event: structuredClone(event),
+    __result: undefined,
+    Buffer,
+    atob: globalThis.atob,
+    btoa: globalThis.btoa,
+    require: (name) => {
+      if (name === 'crypto') return Object.freeze({ createHash, createHmac });
+      if (name === 'querystring') return querystring;
+      if (name === 'buffer') return Object.freeze({ Buffer });
+      throw new Error(`module is not available in the local CloudFront runtime: ${name}`);
+    },
+    console: Object.freeze({
+      log: (...args) => console.log(`[function:${path.basename(file)}]`, ...args),
+      error: (...args) => console.error(`[function:${path.basename(file)}]`, ...args),
+    }),
+  };
+  const context = vm.createContext(sandbox, {
+    name: `CloudFront Function ${file}`,
+    codeGeneration: { strings: false, wasm: false },
+  });
+  const script = new vm.Script(`${source}\n;globalThis.__result = handler(globalThis.__event);`, { filename: resolved });
+  script.runInContext(context, { timeout: FUNCTION_TIMEOUT_MS });
+  if (!sandbox.__result || typeof sandbox.__result.then !== 'function') return sandbox.__result;
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`timed out after ${FUNCTION_TIMEOUT_MS}ms`)), FUNCTION_TIMEOUT_MS);
+  });
+  try { return await Promise.race([Promise.resolve(sandbox.__result), timeout]); }
+  finally { clearTimeout(timeoutId); }
+}
+
+function functionEvent(dist, eventType, request, response, requestId) {
+  return {
+    version: '1.0',
+    context: {
+      distributionDomainName: dist.domainName,
+      distributionId: dist.id,
+      eventType,
+      requestId,
+    },
+    viewer: { ip: request.viewerIp },
+    request: request.event,
+    ...(response ? { response } : {}),
   };
 }
 
@@ -298,6 +546,12 @@ function buildForwardHeaders(req, dist, cached) {
   const h = {};
   const pass = ['accept', 'accept-language', 'range', 'user-agent'];
   for (const k of pass) if (req.headers[k]) h[k] = req.headers[k];
+  if (req.modifiedByFunction) {
+    Object.assign(h, req.headers);
+    for (const name of ['connection', 'content-length', 'expect', 'host', 'keep-alive',
+      'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding',
+      'upgrade', 'via', 'x-distribution-id']) delete h[name];
+  }
   Object.assign(h, dist.origin.customHeaders || {});
   if (cached) {
     if (cached.etag) h['if-none-match'] = cached.etag;
@@ -309,7 +563,23 @@ function buildForwardHeaders(req, dist, cached) {
   return h;
 }
 
-async function deliver(res, req, dist, entry, cacheStatus, metrics) {
+function entryFromFunctionResponse(response, fallbackBody = Buffer.alloc(0)) {
+  if (!response || typeof response !== 'object' || !Number.isInteger(response.statusCode)) {
+    throw new Error('function must return a CloudFront request or response object');
+  }
+  const headers = plainHeadersFromEvent(response.headers || {});
+  const setCookies = setCookieHeadersFromEvent(response.cookies || {});
+  if (setCookies.length) headers['set-cookie'] = setCookies;
+  return {
+    status: response.statusCode,
+    headers,
+    body: bodyFromFunction(response.body, fallbackBody),
+    storedAt: Date.now(),
+    expiresAt: 0,
+  };
+}
+
+async function deliver(res, req, dist, entry, cacheStatus, metrics, functionRequestContext, requestId, runViewerResponse = true) {
   const headers = { ...entry.headers };
   for (const h of ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
     'te', 'trailer', 'transfer-encoding', 'upgrade', 'content-length', 'content-encoding']) {
@@ -317,10 +587,38 @@ async function deliver(res, req, dist, entry, cacheStatus, metrics) {
   }
 
   let body = entry.body || Buffer.alloc(0);
+  let status = entry.status;
   const b = dist.defaultCacheBehavior;
+
+  const now = Date.now();
+  const age = Math.max(0, Math.floor((now - entry.storedAt) / 1000));
+  headers['x-cache'] = `${cacheStatus} from CowFront`;
+  if (cacheStatus !== 'Miss') headers['age'] = String(age);
+  headers['via'] = `1.1 ${dist.id.toLowerCase()}.localfront (CowFront)`;
+  headers['x-amz-cf-pop'] = 'LOCAL1-C1';
+  headers['x-amz-cf-id'] = requestId;
+  headers['x-localfront-dist'] = dist.id;
+
+  const viewerResponseFile = b.functionAssociations?.viewerResponse;
+  if (runViewerResponse && viewerResponseFile) {
+    const responseEvent = functionResponse({ status, headers, body });
+    const result = await runCloudFrontFunction(
+      viewerResponseFile,
+      functionEvent(dist, 'viewer-response', functionRequestContext, responseEvent, requestId)
+    );
+    if (result && typeof result === 'object' && typeof result.uri === 'string') {
+      throw new Error('viewer-response function returned a request object; associate it as viewer-request instead');
+    }
+    const transformed = entryFromFunctionResponse(result, body);
+    status = transformed.status;
+    body = transformed.body;
+    for (const name of Object.keys(headers)) delete headers[name];
+    Object.assign(headers, transformed.headers);
+  }
+
   const ae = req.headers['accept-encoding'] || '';
   const isHead = req.method === 'HEAD';
-  const noBody = isHead || entry.status === 204 || entry.status === 304;
+  const noBody = isHead || status === 204 || status === 304;
 
   if (b.compress && !noBody && body.length > 0 && isCompressible(headers['content-type'])) {
     if (/\bbr\b/.test(ae)) {
@@ -335,22 +633,13 @@ async function deliver(res, req, dist, entry, cacheStatus, metrics) {
 
   if (!noBody) headers['content-length'] = String(body.length);
 
-  const now = Date.now();
-  const age = Math.max(0, Math.floor((now - entry.storedAt) / 1000));
-  headers['x-cache'] = `${cacheStatus} from CowFront`;
-  if (cacheStatus !== 'Miss') headers['age'] = String(age);
-  headers['via'] = `1.1 ${dist.id.toLowerCase()}.localfront (CowFront)`;
-  headers['x-amz-cf-pop'] = 'LOCAL1-C1';
-  headers['x-amz-cf-id'] = randomBytes(24).toString('base64url');
-  headers['x-localfront-dist'] = dist.id;
-
   // metrics
   metrics.requests++;
   if (cacheStatus === 'Hit') metrics.hits++;
   else if (cacheStatus === 'RefreshHit') metrics.refreshHits++;
   else metrics.misses++;
 
-  res.writeHead(entry.status, headers);
+  res.writeHead(status, headers);
   if (noBody) res.end();
   else res.end(body);
 }
@@ -369,24 +658,65 @@ async function handleProxy(req, res, state) {
   const prefix = `/_d/${dist.id}/`;
   if (rawUrl.toLowerCase().startsWith(prefix.toLowerCase())) rawUrl = '/' + rawUrl.slice(prefix.length);
 
-  const urlObj = new URL(rawUrl, 'http://localhost');
+  let urlObj = new URL(rawUrl, 'http://localhost');
   const b = dist.defaultCacheBehavior;
-  const method = req.method;
+  const requestId = randomBytes(24).toString('base64url');
+  const originalFunctionRequest = functionRequest(req, urlObj);
+  const functionRequestContext = {
+    event: originalFunctionRequest,
+    viewerIp: String(req.socket.remoteAddress || '').replace(/^::ffff:/, ''),
+  };
+  let edgeReq = { method: req.method, headers: { ...req.headers } };
+
+  const viewerRequestFile = b.functionAssociations?.viewerRequest;
+  if (viewerRequestFile) {
+    let result;
+    try {
+      result = await runCloudFrontFunction(
+        viewerRequestFile,
+        functionEvent(dist, 'viewer-request', functionRequestContext, null, requestId)
+      );
+    } catch (error) {
+      return sendPlain(res, 502, `CowFront Function error (${viewerRequestFile}): ${error.message}\n`);
+    }
+    if (result && Number.isInteger(result.statusCode)) {
+      let generated;
+      try { generated = entryFromFunctionResponse(result); }
+      catch (error) { return sendPlain(res, 502, `CowFront Function error (${viewerRequestFile}): ${error.message}\n`); }
+      return deliver(res, edgeReq, dist, generated, 'FunctionGenerated', state.metrics, functionRequestContext, requestId, false);
+    }
+    if (!result || typeof result !== 'object' || typeof result.uri !== 'string' || !result.uri.startsWith('/')) {
+      return sendPlain(res, 502, `CowFront Function error (${viewerRequestFile}): function must return a request with a URI beginning with /, or a response\n`);
+    }
+    try {
+      const headers = plainHeadersFromEvent(result.headers || {});
+      const cookie = cookieHeaderFromEvent(result.cookies || {});
+      if (cookie) headers.cookie = cookie;
+      urlObj = new URL(result.uri + queryFromEvent(result.querystring), 'http://localhost');
+      edgeReq = { method: result.method || req.method, headers, modifiedByFunction: true };
+      functionRequestContext.event = result;
+    } catch (error) {
+      return sendPlain(res, 502, `CowFront Function error (${viewerRequestFile}): ${error.message}\n`);
+    }
+  }
+
+  const method = edgeReq.method;
   const cacheableMethod = b.cachedMethods.includes(method);
-  const hasRange = !!req.headers['range'];
-  const key = cacheKey(dist, req, urlObj);
+  const hasRange = !!edgeReq.headers['range'];
+  const key = cacheKey(dist, edgeReq, urlObj);
   const now = Date.now();
 
   // fresh cache hit
   let cached = cacheableMethod && !hasRange ? state.cache.get(key) : null;
   if (cached && now < cached.expiresAt) {
-    return deliver(res, req, dist, cached, 'Hit', state.metrics);
+    try { return await deliver(res, edgeReq, dist, cached, 'Hit', state.metrics, functionRequestContext, requestId); }
+    catch (error) { return sendPlain(res, 502, `CowFront Function error (${b.functionAssociations.viewerResponse}): ${error.message}\n`); }
   }
 
   // fetch from origin (conditional revalidation if we hold a stale entry)
   const isRevalidation = !!cached;
   const originUrl = dist.origin.domainName + dist.origin.originPath + urlObj.pathname + urlObj.search;
-  const fwd = buildForwardHeaders(req, dist, cached);
+  const fwd = buildForwardHeaders(edgeReq, dist, cached);
   let originRes;
   try {
     originRes = await fetch(originUrl, { method, headers: fwd, redirect: 'manual' });
@@ -413,7 +743,8 @@ async function handleProxy(req, res, state) {
       result: 'not-modified',
       ttl,
     });
-    return deliver(res, req, dist, cached, 'RefreshHit', state.metrics);
+    try { return await deliver(res, edgeReq, dist, cached, 'RefreshHit', state.metrics, functionRequestContext, requestId); }
+    catch (error) { return sendPlain(res, 502, `CowFront Function error (${b.functionAssociations.viewerResponse}): ${error.message}\n`); }
   }
 
   const bodyBuf = Buffer.from(await originRes.arrayBuffer());
@@ -450,7 +781,8 @@ async function handleProxy(req, res, state) {
     });
   }
 
-  return deliver(res, req, dist, entry, 'Miss', state.metrics);
+  try { return await deliver(res, edgeReq, dist, entry, 'Miss', state.metrics, functionRequestContext, requestId); }
+  catch (error) { return sendPlain(res, 502, `CowFront Function error (${b.functionAssociations.viewerResponse}): ${error.message}\n`); }
 }
 
 // ----------------------------------------------------------------------------- admin API
@@ -600,9 +932,74 @@ async function handleAdmin(req, res, state) {
 
       if (method === 'GET') return sendJson(res, 200, state.config.distributions[idx]);
 
+      if (method === 'POST' && parts[2] === 'functions') {
+        const body = await readBody(req);
+        let functionPath;
+        try {
+          functionPath = saveFunctionSource(
+            state.config.distributions[idx].id,
+            body.eventType,
+            body.name,
+            body.code
+          );
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+        const associations = state.config.distributions[idx].defaultCacheBehavior.functionAssociations;
+        const otherEventType = body.eventType === 'viewerRequest' ? 'viewerResponse' : 'viewerRequest';
+        associations[body.eventType] = functionPath;
+        // Treat re-saving the same managed file under another event as a move, not a second association.
+        if (associations[otherEventType] === functionPath) associations[otherEventType] = '';
+        persist(state);
+        return sendJson(res, 201, {
+          distribution: state.config.distributions[idx].id,
+          eventType: body.eventType,
+          functionPath,
+        });
+      }
+
+      if (method === 'POST' && parts[2] === 'function-test') {
+        const body = await readBody(req);
+        const testPath = String(body.path || '/');
+        if (!testPath.startsWith('/') || /[\r\n]/.test(testPath)) {
+          return sendJson(res, 400, { error: 'test path must begin with /' });
+        }
+        let response;
+        try {
+          response = await fetch(`http://127.0.0.1:${PROXY_PORT}${testPath}`, {
+            headers: { 'x-distribution-id': state.config.distributions[idx].id },
+            redirect: 'manual',
+          });
+        } catch (error) {
+          return sendJson(res, 502, { error: `test request failed: ${error.message}` });
+        }
+        const responseBody = Buffer.from(await response.arrayBuffer());
+        return sendJson(res, 200, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: headersToObj(response.headers),
+          body: responseBody.subarray(0, 65536).toString('utf8'),
+          truncated: responseBody.length > 65536,
+        });
+      }
+
       if (method === 'PUT') {
         const body = await readBody(req);
-        const merged = normalizeDistribution({ ...state.config.distributions[idx], ...body, id: state.config.distributions[idx].id });
+        const current = state.config.distributions[idx];
+        const merged = normalizeDistribution({
+          ...current,
+          ...body,
+          id: current.id,
+          origin: { ...current.origin, ...(body.origin || {}) },
+          defaultCacheBehavior: {
+            ...current.defaultCacheBehavior,
+            ...(body.defaultCacheBehavior || {}),
+            functionAssociations: {
+              ...(current.defaultCacheBehavior.functionAssociations || {}),
+              ...(body.defaultCacheBehavior?.functionAssociations || {}),
+            },
+          },
+        });
         state.config.distributions[idx] = merged;
         persist(state);
         return sendJson(res, 200, merged);
@@ -634,6 +1031,10 @@ async function handleAdmin(req, res, state) {
 }
 
 function adminDashboardHtml() {
+  const examplePath = path.join(APP_ROOT, 'examples', 'cloudfront-functions', 'remove-html-extension.js');
+  const removeHtmlTemplate = existsSync(examplePath)
+    ? readFileSync(examplePath, 'utf8')
+    : 'function handler(event) {\n  return event.request;\n}\n';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -747,7 +1148,7 @@ function adminDashboardHtml() {
       flex-wrap: wrap;
       margin: 18px 0;
     }
-    button, .ghost, input, textarea {
+    button, .ghost, input, textarea, select {
       font: inherit;
     }
     button, .ghost {
@@ -889,7 +1290,7 @@ function adminDashboardHtml() {
       color: var(--muted);
       font-size: 13px;
     }
-    input, textarea {
+    input, textarea, select {
       width: 100%;
       color: var(--text);
       background: rgba(255,255,255,0.04);
@@ -898,8 +1299,31 @@ function adminDashboardHtml() {
       padding: 11px 12px;
       outline: none;
     }
+    select { color: var(--foreground, var(--text)); background: var(--card, var(--panel)); }
     textarea { min-height: 88px; resize: vertical; }
-    input:focus, textarea:focus {
+    textarea.code-editor {
+      min-height: 300px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      tab-size: 2;
+    }
+    .function-panel { grid-column: span 12; }
+    .function-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    .test-output {
+      margin: 0;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      padding: 14px;
+      color: var(--text);
+      background: rgba(0,0,0,0.22);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 14px;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    input:focus, textarea:focus, select:focus {
       border-color: rgba(114, 214, 255, 0.48);
       box-shadow: 0 0 0 4px rgba(114, 214, 255, 0.12);
     }
@@ -1048,6 +1472,58 @@ function adminDashboardHtml() {
         </div>
       </section>
 
+      <section class="panel function-panel">
+        <div class="panel-head">
+          <h2>Test CloudFront function</h2>
+          <div class="hint" id="functionAssociationHint">Upload a .js file or paste code</div>
+        </div>
+        <div class="panel-body">
+          <form id="functionForm">
+            <div class="field-row">
+              <label>Distribution
+                <select name="distribution" id="functionDistribution" required>
+                  <option value="">Create a distribution first</option>
+                </select>
+              </label>
+              <label>Event type
+                <select name="event-type" id="functionEventType">
+                  <option value="viewerRequest">Viewer request</option>
+                  <option value="viewerResponse">Viewer response</option>
+                </select>
+              </label>
+            </div>
+            <div class="field-row">
+              <label>Upload JavaScript
+                <input name="function-file" id="functionFile" type="file" accept=".js,text/javascript,application/javascript" />
+              </label>
+              <label>Saved filename
+                <input name="function-name" id="functionName" value="cloudfront-function.js" placeholder="cloudfront-function.js" />
+              </label>
+            </div>
+            <label>Function code
+              <textarea class="code-editor" name="function-code" id="functionCode" spellcheck="false" placeholder="function handler(event) {&#10;  return event.request;&#10;}" required></textarea>
+            </label>
+            <div class="function-actions">
+              <button class="primary" type="submit" id="saveFunctionBtn">Save &amp; associate</button>
+              <button class="secondary" type="button" id="loadHtmlExampleBtn">Load remove .html example</button>
+            </div>
+            <div class="hint" id="functionSaveStatus">The function is syntax-checked and stored beside distributions.json.</div>
+          </form>
+
+          <form id="functionTestForm">
+            <div class="field-row">
+              <label>Test path
+                <input name="test-path" id="functionTestPath" value="/about.html?lang=en" required />
+              </label>
+              <label>Action
+                <button class="secondary" type="submit" id="runFunctionBtn">Run through local CDN</button>
+              </label>
+            </div>
+            <pre class="test-output" id="functionTestOutput" hidden></pre>
+          </form>
+        </div>
+      </section>
+
       <section class="panel layout-left invalidate-panel">
         <div class="panel-head">
           <h2>Invalidate cache</h2>
@@ -1086,6 +1562,7 @@ function adminDashboardHtml() {
   <script>
     const proxyPort = ${PROXY_PORT};
     const adminPort = ${ADMIN_PORT};
+    const removeHtmlTemplate = ${JSON.stringify(removeHtmlTemplate)};
     const el = (sel) => document.querySelector(sel);
 
     const state = { distributions: [], revalidations: [], hostMappings: {}, stats: {}, health: null };
@@ -1116,6 +1593,25 @@ function adminDashboardHtml() {
       return navigator.clipboard.writeText(text);
     }
 
+    function updateFunctionHint() {
+      const distribution = state.distributions.find((d) => d.id === el('#functionDistribution').value);
+      const eventType = el('#functionEventType').value;
+      const association = distribution?.defaultCacheBehavior?.functionAssociations?.[eventType];
+      el('#functionAssociationHint').textContent = association
+        ? 'Associated: ' + association
+        : 'No ' + (eventType === 'viewerRequest' ? 'viewer-request' : 'viewer-response') + ' function associated';
+    }
+
+    function showFunctionTest(data) {
+      const output = el('#functionTestOutput');
+      const headers = Object.entries(data.headers || {})
+        .map(([name, value]) => name + ': ' + value)
+        .join('\\n');
+      output.textContent = 'HTTP ' + data.status + ' ' + (data.statusText || '') + '\\n' +
+        headers + '\\n\\n' + (data.body || '') + (data.truncated ? '\\n\\n[body truncated]' : '');
+      output.hidden = false;
+    }
+
     function render() {
       const stats = state.stats || {};
       const hits = Number(stats.hits || 0);
@@ -1132,6 +1628,16 @@ function adminDashboardHtml() {
       ].join('');
 
       el('#distCount').textContent = state.distributions.length + ' total';
+
+      const functionDistribution = el('#functionDistribution');
+      const selectedDistribution = functionDistribution.value;
+      functionDistribution.innerHTML = state.distributions.length
+        ? state.distributions.map((d) => \`<option value="\${escapeHtml(d.id)}">\${escapeHtml(d.id + ' — ' + d.domainName)}</option>\`).join('')
+        : '<option value="">Create a distribution first</option>';
+      if (state.distributions.some((d) => d.id === selectedDistribution)) {
+        functionDistribution.value = selectedDistribution;
+      }
+      updateFunctionHint();
 
       if (!state.distributions.length) {
         el('#distributionList').innerHTML = '<div class="empty">No distributions yet. Use the form on the right to create the first one.</div>';
@@ -1161,11 +1667,14 @@ function adminDashboardHtml() {
               <div class="meta">
                 <div><strong>Comment</strong> \${d.comment || '—'}</div>
                 <div><strong>Created</strong> \${fmtTime(d.createdAt)}</div>
+                <div><strong>Viewer request</strong> \${escapeHtml(d.defaultCacheBehavior.functionAssociations?.viewerRequest || '—')}</div>
+                <div><strong>Viewer response</strong> \${escapeHtml(d.defaultCacheBehavior.functionAssociations?.viewerResponse || '—')}</div>
               </div>
               <div class="actions">
                 <button class="ghost" data-copy="\${d.id}">Copy ID</button>
                 <button class="ghost" data-proxy="\${d.id}">Copy proxy URL</button>
                 \${mapAction}
+                <button class="ghost" data-function="\${d.id}">Functions</button>
                 <button class="ghost" data-invalidate="\${d.id}">Invalidate /*</button>
                 <button class="ghost" data-delete="\${d.id}">Delete</button>
               </div>
@@ -1196,6 +1705,13 @@ function adminDashboardHtml() {
             el('input[name="distribution"]').value = btn.dataset.invalidate;
             el('input[name="paths"]').value = '/*';
             el('#invalidationForm').scrollIntoView({ behavior: 'smooth', block: 'center' });
+          });
+        });
+        el('#distributionList').querySelectorAll('[data-function]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            el('#functionDistribution').value = btn.dataset.function;
+            updateFunctionHint();
+            el('#functionForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
           });
         });
         el('#distributionList').querySelectorAll('[data-map-host]').forEach((btn) => {
@@ -1321,6 +1837,88 @@ function adminDashboardHtml() {
       form.reset();
       form.querySelector('[name="compress"]').checked = true;
       await load();
+    });
+
+    el('#functionDistribution').addEventListener('change', updateFunctionHint);
+    el('#functionEventType').addEventListener('change', updateFunctionHint);
+
+    el('#functionFile').addEventListener('change', async (event) => {
+      const file = event.currentTarget.files?.[0];
+      if (!file) return;
+      el('#functionName').value = file.name;
+      el('#functionCode').value = await file.text();
+      el('#functionSaveStatus').textContent = 'Loaded ' + file.name + '. Review it, then save and associate.';
+    });
+
+    el('#loadHtmlExampleBtn').addEventListener('click', () => {
+      el('#functionEventType').value = 'viewerRequest';
+      el('#functionName').value = 'remove-html-extension.js';
+      el('#functionCode').value = removeHtmlTemplate;
+      el('#functionTestPath').value = '/about.html?lang=en';
+      el('#functionSaveStatus').textContent = 'Example loaded. Click Save & associate, then run the test.';
+      updateFunctionHint();
+    });
+
+    el('#functionForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const distribution = el('#functionDistribution').value;
+      const button = el('#saveFunctionBtn');
+      const status = el('#functionSaveStatus');
+      if (!distribution) return (status.textContent = 'Create or select a distribution first.');
+      button.disabled = true;
+      button.textContent = 'Saving...';
+      try {
+        const r = await fetch('/distributions/' + encodeURIComponent(distribution) + '/functions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            eventType: el('#functionEventType').value,
+            name: el('#functionName').value.trim() || 'cloudfront-function.js',
+            code: el('#functionCode').value,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'function save failed');
+        status.textContent = 'Saved and associated: ' + data.functionPath;
+        await load();
+      } catch (error) {
+        status.textContent = 'Error: ' + error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Save & associate';
+      }
+    });
+
+    el('#functionTestForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const distribution = el('#functionDistribution').value;
+      const output = el('#functionTestOutput');
+      const button = el('#runFunctionBtn');
+      if (!distribution) {
+        output.hidden = false;
+        output.textContent = 'Create or select a distribution first.';
+        return;
+      }
+      button.disabled = true;
+      button.textContent = 'Running...';
+      output.hidden = false;
+      output.textContent = 'Sending request through CowFront...';
+      try {
+        const r = await fetch('/distributions/' + encodeURIComponent(distribution) + '/function-test', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: el('#functionTestPath').value.trim() || '/' }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'function test failed');
+        showFunctionTest(data);
+        await load();
+      } catch (error) {
+        output.textContent = 'Test error: ' + error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Run through local CDN';
+      }
     });
 
     el('#invalidationForm').addEventListener('submit', async (event) => {
@@ -1454,6 +2052,15 @@ function distFromFlags(f, existing) {
   if (f['max-ttl'] !== undefined) d.defaultCacheBehavior.maxTtl = +f['max-ttl'];
   if (f.compress === false) d.defaultCacheBehavior.compress = false;
   if (f['forward-query']) d.defaultCacheBehavior.forwardQueryString = true;
+  d.defaultCacheBehavior.functionAssociations = d.defaultCacheBehavior.functionAssociations || {};
+  if (f['viewer-request-function'] !== undefined) {
+    d.defaultCacheBehavior.functionAssociations.viewerRequest = f['viewer-request-function'] === false
+      ? '' : String(f['viewer-request-function']);
+  }
+  if (f['viewer-response-function'] !== undefined) {
+    d.defaultCacheBehavior.functionAssociations.viewerResponse = f['viewer-response-function'] === false
+      ? '' : String(f['viewer-response-function']);
+  }
   return d;
 }
 
@@ -1485,6 +2092,8 @@ function printDist(d) {
   console.log(`  Origin      ${d.origin.domainName}${d.origin.originPath || ''}`);
   console.log(`  TTL         min=${d.defaultCacheBehavior.minTtl} default=${d.defaultCacheBehavior.defaultTtl} max=${d.defaultCacheBehavior.maxTtl}`);
   console.log(`  Compress    ${d.defaultCacheBehavior.compress}`);
+  const functions = d.defaultCacheBehavior.functionAssociations || {};
+  console.log(`  Functions   viewer-request=${functions.viewerRequest || '(none)'} viewer-response=${functions.viewerResponse || '(none)'}`);
   console.log(`  Enabled     ${d.enabled}`);
   console.log(`  Example     curl -H "X-Distribution-Id: ${d.id}" http://localhost:${PROXY_PORT}/<object-key>`);
 }
@@ -1510,11 +2119,16 @@ Options for create/update:
   --max-ttl <sec>         ceiling TTL (default 31536000)
   --no-compress           disable gzip/br compression
   --forward-query         include query string in the cache key
+  --viewer-request-function <file>   run an AWS-style viewer-request function
+  --viewer-response-function <file>  run an AWS-style viewer-response function
+  --no-viewer-request-function       remove the viewer-request association
+  --no-viewer-response-function      remove the viewer-response association
   --comment "<text>"      free-text comment
   --id <id>               force a specific distribution id
 
 Env:
   LOCALFRONT_PORT (8080)  LOCALFRONT_ADMIN_PORT (5744)  LOCALFRONT_CONFIG (./distributions.json)
+  LOCALFRONT_FUNCTION_TIMEOUT_MS (100)
 
 Friendly hostnames (Windows PowerShell as Administrator):
   npm run hosts:setup

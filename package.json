@@ -43,6 +43,7 @@
     "README.md",
     "assets",
     "docker-compose.yml",
+    "examples",
     "fake-origin.mjs",
     "localfront.mjs",
     "scripts",

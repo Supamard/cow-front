@@ -1,3 +1,12 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Supamard/cow-front/master/assets/cowfront-logo/cowfront-horizontal.png" alt="CowFront Logo" width="480" />
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/cow-front"><img src="https://img.shields.io/npm/v/cow-front.svg" alt="npm version" /></a>
+  <a href="https://github.com/Supamard/cow-front/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license" /></a>
+</p>
+
 # CowFront
 
 A local, **CloudFront-like CDN emulator** that sits in front of **MinIO** (or any HTTP origin) on your machine. Same mental model as CloudFront — distributions, an ID per distribution, an origin, cache behaviors, TTLs, invalidations — but everything runs on `localhost` with zero dependencies.

@@ -82,6 +82,8 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   assert.match(pageText, /href="\/style\.css"/);
   assert.match(pageText, /Revalidation history/);
   assert.match(pageText, /Map hostname/);
+  assert.match(pageText, /id="auditSetupBtn"/);
+  assert.match(pageText, /id="auditDialog"/);
   assert.match(pageText, /id="functionForm"/);
   assert.match(pageText, /Upload JavaScript/);
   assert.match(pageText, /Load remove \.html example/);
@@ -104,6 +106,12 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   assert.equal((await fetch('http://127.0.0.1:' + adminPort + '/cowfront-logo.png')).status, 200);
   const revalidations = await fetch(`http://127.0.0.1:${adminPort}/revalidations`);
   assert.deepEqual((await revalidations.json()).revalidations, []);
+  const auditRes = await fetch(`http://127.0.0.1:${adminPort}/audit`);
+  assert.equal(auditRes.status, 200);
+  const auditData = await auditRes.json();
+  assert.ok(auditData.summary);
+  assert.ok(Array.isArray(auditData.categories));
+  assert.ok(Array.isArray(auditData.recommendations));
   const created = await fetch(`http://127.0.0.1:${adminPort}/distributions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -552,5 +560,33 @@ function handler(event) {
 
   // Check that the imported function was also restored
   assert.equal(existsSync(path.join(tempDir, '.localfront-functions', 'EIMPORTED2-req.js')), true);
+});
+
+test('cowfront audit and doctor commands report setup state and recommendations', () => {
+  const cliAudit = spawnSync(process.execPath, [path.join(root, 'localfront.mjs'), 'audit'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  assert.match(cliAudit.stdout, /CowFront Setup State Audit/);
+  assert.match(cliAudit.stdout, /Runtime Environment/);
+  assert.match(cliAudit.stdout, /Audit Result:/);
+
+  const cliAuditJson = spawnSync(process.execPath, [path.join(root, 'localfront.mjs'), 'audit', '--json'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  assert.equal(cliAuditJson.status === 0 || cliAuditJson.status === 1, true);
+  const parsed = JSON.parse(cliAuditJson.stdout);
+  assert.equal(typeof parsed.ok, 'boolean');
+  assert.ok(parsed.summary);
+  assert.ok(parsed.summary.total > 0);
+  assert.ok(Array.isArray(parsed.categories));
+  assert.ok(Array.isArray(parsed.recommendations));
+
+  const cliDoctor = spawnSync(process.execPath, [path.join(root, 'localfront.mjs'), 'doctor'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  assert.match(cliDoctor.stdout, /CowFront Setup State Audit/);
 });
 

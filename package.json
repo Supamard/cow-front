@@ -1,6 +1,6 @@
 {
   "name": "cow-front",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A local, CloudFront-like CDN emulator that fronts MinIO or any HTTP origin. Zero dependencies.",
   "author": "Supamard Jittithammawat",
   "type": "module",
@@ -40,6 +40,8 @@
     "minio:public": "node scripts/minio-public.mjs",
     "minio:down": "docker compose down",
     "hosts:setup": "node scripts/setup-hosts.mjs",
+    "audit": "node localfront.mjs audit",
+    "doctor": "node localfront.mjs audit",
     "share": "node scripts/share.mjs"
   },
   "engines": {

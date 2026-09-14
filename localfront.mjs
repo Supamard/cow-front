@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as querystring from 'node:querystring';
+import { runAudit, formatAuditReport } from './scripts/audit.mjs';
 
 const gzip = promisify(zlib.gzip);
 const brotli = promisify(zlib.brotliCompress);
@@ -947,6 +948,16 @@ async function handleAdmin(req, res, state) {
     return sendJson(res, 200, { revalidations: state.revalidations });
   }
 
+  if (url.pathname === '/audit' && method === 'GET') {
+    const result = await runAudit({
+      appRoot: APP_ROOT,
+      configPath: CONFIG_PATH,
+      hostsPath: HOSTS_PATH,
+      caddyfilePath: CADDYFILE_PATH,
+    });
+    return sendJson(res, 200, result);
+  }
+
   if (url.pathname === '/host-mappings' && method === 'GET') {
     const mapped = mappedLoopbackHostnames();
     const mappings = {};
@@ -1517,6 +1528,7 @@ function adminDashboardHtml() {
         <p class="sub">Switch sites once, then test functions, clear cache, and open the active endpoint without losing context.</p>
       </div>
       <div class="toolbar" aria-label="Dashboard actions">
+        <button class="secondary" id="auditSetupBtn" type="button" title="Audit system setup and dependencies">Audit Setup</button>
         <button class="secondary" id="copyApiBtn">Copy admin URL</button>
         <button class="primary" id="refreshBtn">Refresh data</button>
       </div>
@@ -1789,6 +1801,25 @@ function adminDashboardHtml() {
               </div>
             </div>
           </form>
+          </div>
+        </dialog>
+
+        <dialog class="create-dialog" id="auditDialog" aria-labelledby="auditDialogTitle" style="max-width: 680px; width: 92vw;">
+          <div class="dialog-head">
+            <div>
+              <h2 id="auditDialogTitle">Setup state audit</h2>
+              <p class="hint" id="auditDialogSubtitle">Verifying system prerequisites and services against README</p>
+            </div>
+            <button class="icon-button" id="closeAuditDialogBtn" type="button" aria-label="Close audit dialog">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="m6 6 12 12M18 6 6 18" />
+              </svg>
+            </button>
+          </div>
+          <div class="panel-body">
+            <div id="auditContent" style="display:grid; gap:16px;">
+              <div class="hint">Loading audit results...</div>
+            </div>
           </div>
         </dialog>
       </div>
@@ -2435,6 +2466,94 @@ function adminDashboardHtml() {
       await load();
     });
 
+    const auditDialog = el('#auditDialog');
+    const closeAuditDialog = () => auditDialog?.close();
+    el('#closeAuditDialogBtn')?.addEventListener('click', closeAuditDialog);
+    auditDialog?.addEventListener('click', (e) => { if (e.target === auditDialog) closeAuditDialog(); });
+
+    el('#auditSetupBtn')?.addEventListener('click', async () => {
+      if (!auditDialog) return;
+      const content = el('#auditContent');
+      content.innerHTML = '<div class="hint">Running audit checks across Node.js, MinIO, Caddy, hosts file, and distributions...</div>';
+      auditDialog.showModal();
+      try {
+        const res = await fetch('/audit');
+        const data = await res.json();
+        const sum = data.summary || {};
+        const isOk = data.ok;
+        const statusClass = isOk ? 'good' : (sum.fail > 0 ? 'bad' : 'warn');
+        let html = \`
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:rgba(255,255,255,0.03); border-radius:12px; border:1px solid rgba(255,255,255,0.08);">
+            <div>
+              <strong style="font-size:15px;">Audit Status: <span class="\${statusClass}">\${isOk ? 'All Systems Operational' : 'Action Required'}</span></strong>
+              <div class="hint" style="margin-top:2px;">\${sum.pass || 0} passed, \${sum.warn || 0} warnings, \${sum.fail || 0} failed</div>
+            </div>
+            <button class="ghost" id="rerunAuditBtn" type="button" style="font-size:12px; padding:5px 12px;">Re-run Audit</button>
+          </div>
+        \`;
+
+        if (data.recommendations && data.recommendations.length > 0) {
+          html += \`
+            <div style="background:rgba(255,212,140,0.08); border:1px solid rgba(255,212,140,0.25); border-radius:12px; padding:14px;">
+              <h3 style="margin:0 0 10px; font-size:14px; color:var(--warn);">Recommended Actions (from README)</h3>
+              <div style="display:grid; gap:10px;">
+                \${data.recommendations.map((rec, i) => \`
+                  <div style="background:rgba(0,0,0,0.2); padding:10px 12px; border-radius:8px;">
+                    <div style="font-size:13px; font-weight:700;">\${i+1}. \${escapeHtml(rec.title)}</div>
+                    \${rec.reason ? \`<div class="hint" style="margin:2px 0 6px;">\${escapeHtml(rec.reason)}</div>\` : ''}
+                    <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+                      <code style="flex:1; background:rgba(255,255,255,0.05); padding:6px 10px; border-radius:6px; font-family:monospace; font-size:12px; overflow-x:auto;">\${escapeHtml(rec.command)}</code>
+                      <button class="ghost" type="button" data-copy-cmd="\${escapeHtml(rec.command)}" style="font-size:11px; padding:5px 10px;">Copy</button>
+                    </div>
+                  </div>
+                \`).join('')}
+              </div>
+            </div>
+          \`;
+        }
+
+        html += \`
+          <div style="display:grid; gap:12px; max-height:420px; overflow-y:auto; padding-right:4px;">
+            \${(data.categories || []).map((cat) => \`
+              <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:12px; padding:12px 14px;">
+                <div style="font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:8px;">\${escapeHtml(cat.name)}</div>
+                <div style="display:grid; gap:6px;">
+                  \${(cat.checks || []).map((chk) => {
+                    const badgeClass = chk.status === 'pass' ? 'good' : (chk.status === 'fail' ? 'bad' : 'warn');
+                    const badgeIcon = chk.status === 'pass' ? '✓' : (chk.status === 'fail' ? '✕' : (chk.status === 'warn' ? '!' : 'ℹ'));
+                    return \`
+                      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; font-size:13px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.03);">
+                        <div>
+                          <strong>\${escapeHtml(chk.name)}</strong>
+                          <div class="hint" style="margin-top:2px;">\${escapeHtml(chk.message)}</div>
+                        </div>
+                        <span class="chip \${badgeClass}" style="font-size:11px; padding:2px 8px; flex-shrink:0;">\${badgeIcon} \${chk.status.toUpperCase()}</span>
+                      </div>
+                    \`;
+                  }).join('')}
+                </div>
+              </div>
+            \`).join('')}
+          </div>
+        \`;
+
+
+        content.innerHTML = html;
+
+        content.querySelectorAll('[data-copy-cmd]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            await copy(btn.dataset.copyCmd);
+            btn.textContent = 'Copied!';
+            setTimeout(() => (btn.textContent = 'Copy'), 900);
+          });
+        });
+
+        el('#rerunAuditBtn')?.addEventListener('click', () => el('#auditSetupBtn')?.click());
+      } catch (err) {
+        content.innerHTML = '<div class="hint" style="color:var(--bad);">Audit failed: ' + escapeHtml(err.message) + '</div>';
+      }
+    });
+
     load().catch((err) => {
       el('#healthLine').textContent = 'Dashboard error';
       el('#healthHint').textContent = err.message;
@@ -2617,6 +2736,7 @@ const HELP = `CowFront — local CloudFront-like CDN for MinIO / any HTTP origin
 
 Usage:
   cowfront serve
+  cowfront audit (or doctor) [--json]
   cowfront create-distribution --origin <url> [--origin-path /bucket] [options]
   cowfront list-distributions
   cowfront get-distribution <id>
@@ -2681,6 +2801,25 @@ async function cli(argv) {
 
     case 'serve':
       return serve();
+
+    case 'audit':
+    case 'doctor': {
+      const jsonMode = f.json || f._.includes('--json');
+      const result = await runAudit({
+        appRoot: APP_ROOT,
+        configPath: CONFIG_PATH,
+        hostsPath: HOSTS_PATH,
+        caddyfilePath: CADDYFILE_PATH,
+      });
+      if (jsonMode) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        const useColors = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
+        console.log(formatAuditReport(result, useColors));
+      }
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
 
     case 'create-distribution': {
       const input = distFromFlags(f);
@@ -2767,6 +2906,7 @@ async function cli(argv) {
       return;
     }
 
+    case 'stat':
     case 'stats': {
       if (!up) return console.error('server not running');
       console.log(JSON.stringify(await api('GET', '/stats'), null, 2));
@@ -2844,6 +2984,17 @@ async function cli(argv) {
     case 'map-hosts': {
       const scriptPath = path.join(APP_ROOT, 'scripts', 'setup-hosts.mjs');
       const result = spawnSync(process.execPath, [scriptPath], {
+        cwd: APP_ROOT,
+        env: process.env,
+        stdio: 'inherit',
+      });
+      process.exitCode = result.status ?? 0;
+      return;
+    }
+
+    case 'caddy': {
+      const scriptPath = path.join(APP_ROOT, 'scripts', 'caddy.mjs');
+      const result = spawnSync(process.execPath, [scriptPath, ...rest], {
         cwd: APP_ROOT,
         env: process.env,
         stdio: 'inherit',

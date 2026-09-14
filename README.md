@@ -25,6 +25,8 @@ browser ──▶ CowFront (:8080)  ──▶  MinIO (:9000)  [bucket = origin p
 - Node.js >= 18 (uses built-in `fetch`, `zlib`, `crypto` — no npm install needed)
 - MinIO (via the included `docker-compose.yml`) or any HTTP origin
 
+Run `npm run audit` (or `cowfront audit`) anytime to audit your setup state and get recommended install/fix commands.
+
 ## Quickstart
 
 **1. Start MinIO** (creates a public-read `assets` bucket + a sample `hello.txt`):
@@ -208,6 +210,7 @@ If installed globally or linked (`npm link`), use `cowfront <command>`. You can 
 
 ```bash
 cowfront serve
+cowfront audit (or doctor) [--json]
 cowfront create-distribution --origin <url> [--origin-path /bucket] [options]
 cowfront list-distributions
 cowfront get-distribution <id>
@@ -215,11 +218,36 @@ cowfront update-distribution <id> [options]
 cowfront delete-distribution <id>
 cowfront create-invalidation <id> --paths "/*" ["/img/*" ...]
 cowfront stats
+cowfront export [file.json]
+cowfront import <file.json> [--replace]
+cowfront setup-hosts (or map-hosts)
 ```
 
 **Options** (create/update): `--origin`, `--origin-path`, `--default-ttl`, `--min-ttl`, `--max-ttl`, `--no-compress`, `--forward-query`, `--viewer-request-function`, `--viewer-response-function`, `--comment`, `--id`.
 
 The CLI talks to the running server's admin API when it's up; otherwise it edits `distributions.json` directly (so you can pre-provision before starting). The server watches that file and hot-reloads.
+
+### Setup state audit (`cowfront audit`)
+
+CowFront can audit your machine's setup state and verify all prerequisites:
+
+```bash
+npm run audit
+# or: cowfront audit
+# or get raw JSON: cowfront audit --json
+```
+
+It checks:
+- **Node.js**: verifies `>= 18`.
+- **Docker & Compose**: checks Docker engine and Compose availability.
+- **MinIO Storage**: probes S3 API (:9000), web console (:9001), and `mc` CLI.
+- **Caddy**: verifies installation, Caddyfile validity, and port 80 / Windows portproxy rule status.
+- **Hosts file**: verifies loopback aliases (`cowfront.local`, `gh-dev.test`, `app.local`, `site.local`, etc.).
+- **CowFront services**: checks Admin API (:5744) and CDN Proxy (:8080).
+- **Distributions**: validates `distributions.json`, origins reachability, and function associations.
+- **Recommendations**: if any component is missing or misconfigured, it gives the exact command from this README to install or activate it.
+
+You can also run the audit inside the dashboard at `http://cowfront.local/` by clicking **Audit Setup**.
 
 ## CloudFront Functions
 

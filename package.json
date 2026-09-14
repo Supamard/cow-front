@@ -1,10 +1,13 @@
 {
-  "name": "localfront",
+  "name": "cow-front",
   "version": "1.0.0",
   "description": "A local, CloudFront-like CDN emulator that fronts MinIO or any HTTP origin. Zero dependencies.",
   "author": "Supamard Jittithammawat",
   "type": "module",
+  "main": "localfront.mjs",
   "keywords": [
+    "cowfront",
+    "cow-front",
     "cdn",
     "cloudfront",
     "minio",
@@ -14,6 +17,8 @@
     "cli"
   ],
   "bin": {
+    "cow-front": "./localfront.mjs",
+    "cowfront": "./localfront.mjs",
     "localfront": "./localfront.mjs"
   },
   "scripts": {
@@ -38,6 +43,9 @@
     "node": ">=18"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "LICENSE",
     "README.md",
@@ -47,15 +55,14 @@
     "fake-origin.mjs",
     "localfront.mjs",
     "scripts",
-    "style.css",
-    "tests"
+    "style.css"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Supamard/local-front.git"
+    "url": "git+https://github.com/Supamard/cow-front.git"
   },
-  "homepage": "https://github.com/Supamard/local-front#readme",
+  "homepage": "https://github.com/Supamard/cow-front#readme",
   "bugs": {
-    "url": "https://github.com/Supamard/local-front/issues"
+    "url": "https://github.com/Supamard/cow-front/issues"
   }
 }

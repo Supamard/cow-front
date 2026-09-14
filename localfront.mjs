@@ -1043,7 +1043,6 @@ function adminDashboardHtml() {
   <title>CowFront-Farm</title>
   <link rel="icon" href="/favicon.ico" sizes="any" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-  <link rel="stylesheet" href="/style.css" />
   <style>
     :root {
       color-scheme: dark;
@@ -1376,62 +1375,172 @@ function adminDashboardHtml() {
       button, .ghost { width: 100%; justify-content: center; }
     }
   </style>
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <div class="wrap">
-    <section class="top-grid">
-    <section class="hero">
-      <div class="title">
-        <div class="brand-lockup">
-          <img src="/cowfront-logo.png" alt="CowFront" />
+    <header class="app-header">
+      <div class="brand-lockup">
+        <img src="/cowfront-logo.png" alt="CowFront" />
+        <span class="brand-tag">Admin</span>
+      </div>
+      <div class="header-copy">
+        <h1>Manage every local site from one place.</h1>
+        <p class="sub">Switch sites once, then test functions, clear cache, and open the active endpoint without losing context.</p>
+      </div>
+      <div class="toolbar" aria-label="Dashboard actions">
+        <button class="secondary" id="copyApiBtn">Copy admin URL</button>
+        <button class="primary" id="refreshBtn">Refresh data</button>
+      </div>
+    </header>
+
+    <section class="overview" aria-label="Service overview">
+      <div class="service-state">
+        <span class="health-dot" aria-hidden="true"></span>
+        <div>
+          <div class="status-value" id="healthLine">Checking...</div>
+          <div class="hint" id="healthHint">Loading the admin API and current stats.</div>
         </div>
-        <div class="eyebrow">CowFront Admin</div>
-        <h1>Control your local CDN from one small dashboard.</h1>
-        <p class="sub">
-          Create distributions, watch cache health, and invalidate objects without leaving the browser.
-          Everything here talks to the admin API on port ${ADMIN_PORT}, while the proxy stays on port ${PROXY_PORT}.
-        </p>
-        <div class="toolbar">
-          <button class="primary" id="refreshBtn">Refresh data</button>
-          <button class="secondary" id="copyApiBtn">Copy admin URL</button>
-        </div>
+      </div>
+      <div class="stats-grid" id="statsGrid"></div>
+      <div class="overview-meta" id="updatedAt">Not loaded yet</div>
+    </section>
+
+    <section class="site-context panel" aria-labelledby="workingSiteTitle">
+      <div class="context-copy">
+        <h2 id="workingSiteTitle">Working site</h2>
+        <p class="hint" id="activeSiteSummary">Choose a site to apply it across the tools below.</p>
+      </div>
+      <label class="site-switcher">Site
+        <select id="siteSwitcher" aria-describedby="activeSiteSummary">
+          <option value="">Create a distribution first</option>
+        </select>
+      </label>
+      <div class="context-actions">
+        <button class="secondary" type="button" id="copySiteIdBtn" disabled>Copy ID</button>
+        <a class="button-link primary" id="openSiteBtn" href="#" target="_blank" rel="noreferrer" aria-disabled="true">Open site</a>
       </div>
     </section>
 
-    <section class="panel stats">
-      <div class="panel-head">
-        <h2>Overview</h2>
-        <div class="hint" id="updatedAt">Not loaded yet</div>
-      </div>
-      <div class="overview-status">
-        <div class="status-label">Service status</div>
-        <div class="status-value" id="healthLine">Checking...</div>
-        <div class="hint" id="healthHint">Loading the admin API and current stats.</div>
-      </div>
-      <div class="panel-body">
-        <div class="stats-grid" id="statsGrid"></div>
-      </div>
-    </section>
-    </section>
-
-    <section class="grid workspace-grid" style="margin-top:16px;">
-      <section class="panel layout-right list-panel">
+    <main class="workspace-grid">
+      <section class="panel list-panel" aria-labelledby="sitesTitle">
         <div class="panel-head">
-          <h2>Distributions</h2>
-          <div class="hint" id="distCount">0 total</div>
+          <div>
+            <h2 id="sitesTitle">Sites</h2>
+            <p class="hint">Select a site to keep every tool in sync.</p>
+          </div>
+          <div class="count-badge" id="distCount">0 total</div>
         </div>
         <div class="panel-body">
+          <label class="search-field"><span>Find a site</span>
+            <input id="siteSearch" type="search" placeholder="Domain, ID, or origin" autocomplete="off" />
+          </label>
           <div class="table" id="distributionList"></div>
         </div>
       </section>
 
-      <section class="panel layout-left create-panel">
-        <div class="panel-head">
-          <h2>Create distribution</h2>
-          <div class="hint">POST /distributions</div>
+      <div class="operations">
+        <div class="operation-quick-grid">
+          <section class="panel invalidate-panel" id="invalidatePanel">
+            <div class="panel-head">
+              <div>
+                <h2>Invalidate cache</h2>
+                <p class="hint">Clear one path or the entire working site.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <form id="invalidationForm">
+                <div class="field-row">
+                  <label>Distribution ID
+                    <input name="distribution" placeholder="E1A2B3C4D5E6F7" required />
+                  </label>
+                  <label>Paths
+                    <input name="paths" placeholder="/*, /img/*" />
+                  </label>
+                </div>
+                <div class="form-footer">
+                  <span class="hint">Separate multiple paths with commas.</span>
+                  <button class="primary" type="submit">Invalidate cache</button>
+                </div>
+              </form>
+            </div>
+          </section>
+
+          <button class="panel add-site-launcher" id="openCreateDialogBtn" type="button" aria-haspopup="dialog" aria-controls="createSiteDialog">
+            <span class="add-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </span>
+            <span><strong>Add a site</strong><small>Create a distribution</small></span>
+          </button>
         </div>
-        <div class="panel-body">
-          <form id="createForm">
+
+        <section class="panel function-panel" id="functionsPanel">
+          <div class="panel-head">
+            <div>
+              <h2>CloudFront function</h2>
+              <p class="hint">Associate code and test it against the working site.</p>
+            </div>
+            <div class="hint" id="functionAssociationHint">Upload a .js file or paste code</div>
+          </div>
+          <div class="panel-body">
+            <form id="functionForm">
+              <div class="field-row">
+                <label>Distribution
+                  <select name="distribution" id="functionDistribution" required>
+                    <option value="">Create a distribution first</option>
+                  </select>
+                </label>
+                <label>Event type
+                  <select name="event-type" id="functionEventType">
+                    <option value="viewerRequest">Viewer request</option>
+                    <option value="viewerResponse">Viewer response</option>
+                  </select>
+                </label>
+              </div>
+              <div class="field-row">
+                <label>Upload JavaScript
+                  <input name="function-file" id="functionFile" type="file" accept=".js,text/javascript,application/javascript" />
+                </label>
+                <label>Saved filename
+                  <input name="function-name" id="functionName" value="cloudfront-function.js" placeholder="cloudfront-function.js" />
+                </label>
+              </div>
+              <label>Function code
+                <textarea class="code-editor" name="function-code" id="functionCode" spellcheck="false" placeholder="function handler(event) {&#10;  return event.request;&#10;}" required></textarea>
+              </label>
+              <div class="function-actions">
+                <button class="primary" type="submit" id="saveFunctionBtn">Save &amp; associate</button>
+                <button class="secondary" type="button" id="loadHtmlExampleBtn">Load remove .html example</button>
+              </div>
+              <div class="hint" id="functionSaveStatus">The function is syntax-checked and stored beside distributions.json.</div>
+            </form>
+
+            <form class="test-form" id="functionTestForm">
+              <label>Test path
+                <input name="test-path" id="functionTestPath" value="/about.html?lang=en" required />
+              </label>
+              <button class="secondary" type="submit" id="runFunctionBtn">Run through local CDN</button>
+              <pre class="test-output" id="functionTestOutput" hidden></pre>
+            </form>
+          </div>
+        </section>
+
+        <dialog class="create-dialog" id="createSiteDialog" aria-labelledby="createSiteTitle">
+          <div class="dialog-head">
+            <div>
+              <h2 id="createSiteTitle">Add a site</h2>
+              <p class="hint">Create another local distribution.</p>
+            </div>
+            <button class="icon-button" id="closeCreateDialogBtn" type="button" aria-label="Close add site dialog">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="m6 6 12 12M18 6 6 18" />
+              </svg>
+            </button>
+          </div>
+          <div class="panel-body">
+          <form id="createForm" method="dialog">
             <div class="field-row">
               <label>Origin URL
                 <input name="origin" placeholder="http://localhost:9000" required />
@@ -1466,97 +1575,31 @@ function adminDashboardHtml() {
               <label><input name="compress" type="checkbox" checked /> Compress objects</label>
               <label><input name="forward-query" type="checkbox" /> Forward query string</label>
             </div>
-            <button class="primary" type="submit">Create distribution</button>
-            <div class="hint">A distribution ID is generated automatically unless you provide one.</div>
+            <div class="form-footer">
+              <span class="hint">The distribution ID is generated automatically unless you provide one.</span>
+              <div class="dialog-actions">
+                <button class="secondary" id="cancelCreateDialogBtn" type="button">Cancel</button>
+                <button class="primary" type="submit">Create distribution</button>
+              </div>
+            </div>
           </form>
-        </div>
-      </section>
+          </div>
+        </dialog>
+      </div>
+    </main>
 
-      <section class="panel function-panel">
-        <div class="panel-head">
-          <h2>Test CloudFront function</h2>
-          <div class="hint" id="functionAssociationHint">Upload a .js file or paste code</div>
-        </div>
-        <div class="panel-body">
-          <form id="functionForm">
-            <div class="field-row">
-              <label>Distribution
-                <select name="distribution" id="functionDistribution" required>
-                  <option value="">Create a distribution first</option>
-                </select>
-              </label>
-              <label>Event type
-                <select name="event-type" id="functionEventType">
-                  <option value="viewerRequest">Viewer request</option>
-                  <option value="viewerResponse">Viewer response</option>
-                </select>
-              </label>
-            </div>
-            <div class="field-row">
-              <label>Upload JavaScript
-                <input name="function-file" id="functionFile" type="file" accept=".js,text/javascript,application/javascript" />
-              </label>
-              <label>Saved filename
-                <input name="function-name" id="functionName" value="cloudfront-function.js" placeholder="cloudfront-function.js" />
-              </label>
-            </div>
-            <label>Function code
-              <textarea class="code-editor" name="function-code" id="functionCode" spellcheck="false" placeholder="function handler(event) {&#10;  return event.request;&#10;}" required></textarea>
-            </label>
-            <div class="function-actions">
-              <button class="primary" type="submit" id="saveFunctionBtn">Save &amp; associate</button>
-              <button class="secondary" type="button" id="loadHtmlExampleBtn">Load remove .html example</button>
-            </div>
-            <div class="hint" id="functionSaveStatus">The function is syntax-checked and stored beside distributions.json.</div>
-          </form>
-
-          <form id="functionTestForm">
-            <div class="field-row">
-              <label>Test path
-                <input name="test-path" id="functionTestPath" value="/about.html?lang=en" required />
-              </label>
-              <label>Action
-                <button class="secondary" type="submit" id="runFunctionBtn">Run through local CDN</button>
-              </label>
-            </div>
-            <pre class="test-output" id="functionTestOutput" hidden></pre>
-          </form>
-        </div>
-      </section>
-
-      <section class="panel layout-left invalidate-panel">
-        <div class="panel-head">
-          <h2>Invalidate cache</h2>
-          <div class="hint">POST /distributions/:id/invalidations</div>
-        </div>
-        <div class="panel-body">
-          <form id="invalidationForm">
-            <div class="field-row">
-              <label>Distribution ID
-                <input name="distribution" placeholder="E1A2B3C4D5E6F7" required />
-              </label>
-              <label>Paths
-                <input name="paths" placeholder="/*, /img/*" />
-              </label>
-            </div>
-            <button class="primary" type="submit">Invalidate</button>
-            <div class="hint">Separate multiple invalidation paths with commas.</div>
-          </form>
-        </div>
-      </section>
-    </section>
     <section class="panel revalidation-panel">
       <div class="panel-head">
-        <h2>Revalidation history</h2>
-        <div class="hint">latest 100 checks</div>
+        <div>
+          <h2>Revalidation history</h2>
+          <p class="hint">Latest 100 revalidations and invalidations across every site.</p>
+        </div>
       </div>
       <div class="panel-body">
         <div class="history-table" id="revalidationList"></div>
       </div>
     </section>
-    <div class="footer-note">
-      CowFront admin console. The proxy endpoint remains available on port ${PROXY_PORT}.
-    </div>
+    <footer class="footer-note">Admin API ${ADMIN_PORT} <span aria-hidden="true">·</span> Proxy ${PROXY_PORT}</footer>
   </div>
 
   <script>
@@ -1565,7 +1608,15 @@ function adminDashboardHtml() {
     const removeHtmlTemplate = ${JSON.stringify(removeHtmlTemplate)};
     const el = (sel) => document.querySelector(sel);
 
-    const state = { distributions: [], revalidations: [], hostMappings: {}, stats: {}, health: null };
+    const state = {
+      distributions: [],
+      revalidations: [],
+      hostMappings: {},
+      stats: {},
+      health: null,
+      activeDistributionId: '',
+      searchQuery: '',
+    };
 
     function fmtTime(ts) {
       return new Date(ts).toLocaleString([], {
@@ -1612,6 +1663,148 @@ function adminDashboardHtml() {
       output.hidden = false;
     }
 
+    function setActiveSite(id) {
+      const distribution = state.distributions.find((item) => item.id === id) || null;
+      state.activeDistributionId = distribution?.id || '';
+      el('#siteSwitcher').value = state.activeDistributionId;
+      el('#functionDistribution').value = state.activeDistributionId;
+      el('input[name="distribution"]').value = state.activeDistributionId;
+      el('#copySiteIdBtn').disabled = !distribution;
+
+      const openButton = el('#openSiteBtn');
+      if (distribution) {
+        const origin = distribution.origin.domainName + (distribution.origin.originPath || '');
+        openButton.href = 'http://' + distribution.domainName + ':' + proxyPort + '/';
+        openButton.setAttribute('aria-disabled', 'false');
+        el('#activeSiteSummary').textContent = distribution.id + ' · ' + origin;
+      } else {
+        openButton.href = '#';
+        openButton.setAttribute('aria-disabled', 'true');
+        el('#activeSiteSummary').textContent = 'Create a distribution to use the site tools.';
+      }
+
+      el('#distributionList').querySelectorAll('[data-site-card]').forEach((card) => {
+        card.classList.toggle('is-active', card.dataset.siteCard === state.activeDistributionId);
+      });
+      updateFunctionHint();
+    }
+
+    function renderDistributionList() {
+      const query = state.searchQuery.trim().toLowerCase();
+      const visible = query
+        ? state.distributions.filter((d) => [d.id, d.domainName, d.origin.domainName, d.origin.originPath, d.comment]
+            .filter(Boolean).join(' ').toLowerCase().includes(query))
+        : state.distributions;
+
+      el('#distCount').textContent = query
+        ? visible.length + ' of ' + state.distributions.length
+        : state.distributions.length + ' total';
+
+      if (!state.distributions.length) {
+        el('#distributionList').innerHTML = '<div class="empty">No sites yet. Open “Add a site” to create the first distribution.</div>';
+        return;
+      }
+      if (!visible.length) {
+        el('#distributionList').innerHTML = '<div class="empty">No sites match that search. Try a domain, distribution ID, or origin.</div>';
+        return;
+      }
+
+      el('#distributionList').innerHTML = visible.map((d) => {
+        const enabled = d.enabled !== false;
+        const originUrl = d.origin.domainName + (d.origin.originPath || '');
+        const ttl = [d.defaultCacheBehavior.minTtl, d.defaultCacheBehavior.defaultTtl, d.defaultCacheBehavior.maxTtl].join(' / ');
+        const associations = d.defaultCacheBehavior.functionAssociations || {};
+        const functionCount = Number(Boolean(associations.viewerRequest)) + Number(Boolean(associations.viewerResponse));
+        const hostMapping = state.hostMappings[String(d.domainName).toLowerCase()];
+        const mapAction = hostMapping && !hostMapping.mapped
+          ? \`<button class="ghost" data-map-host="\${escapeHtml(d.domainName)}">Map hostname</button>\`
+          : '';
+        return \`
+          <article class="dist \${d.id === state.activeDistributionId ? 'is-active' : ''}" data-site-card="\${escapeHtml(d.id)}">
+            <div class="dist-top">
+              <button class="site-select" type="button" data-select-site="\${escapeHtml(d.id)}" aria-label="Work on \${escapeHtml(d.domainName)}">
+                <span class="dist-domain">\${escapeHtml(d.domainName)}</span>
+                <span class="dist-id">\${escapeHtml(d.id)}</span>
+              </button>
+              <span class="chip \${enabled ? 'good' : 'bad'}">\${enabled ? 'Enabled' : 'Disabled'}</span>
+            </div>
+            <div class="meta">
+              <div class="meta-row"><strong>Origin</strong><span class="meta-value" title="\${escapeHtml(originUrl)}">\${escapeHtml(originUrl)}</span></div>
+              <div class="meta-row"><strong>TTL</strong><span class="meta-value">\${escapeHtml(ttl)} seconds</span></div>
+              <div class="meta-row"><strong>Functions</strong><span class="meta-value">\${functionCount ? functionCount + ' associated' : 'None associated'}</span></div>
+              \${d.comment ? '<div class="meta-row"><strong>Note</strong><span class="meta-value" title="' + escapeHtml(d.comment) + '">' + escapeHtml(d.comment) + '</span></div>' : ''}
+            </div>
+            <div class="actions">
+              <button class="ghost" data-proxy="\${escapeHtml(d.id)}">Copy URL</button>
+              \${mapAction}
+              <button class="ghost" data-function="\${escapeHtml(d.id)}">Functions</button>
+              <button class="ghost" data-invalidate="\${escapeHtml(d.id)}">Invalidate</button>
+              <button class="ghost" data-delete="\${escapeHtml(d.id)}">Delete</button>
+            </div>
+          </article>
+        \`;
+      }).join('');
+
+      el('#distributionList').querySelectorAll('[data-select-site]').forEach((button) => {
+        button.addEventListener('click', () => setActiveSite(button.dataset.selectSite));
+      });
+      el('#distributionList').querySelectorAll('[data-proxy]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const distribution = state.distributions.find((item) => item.id === button.dataset.proxy);
+          if (!distribution) return;
+          await copy('http://' + distribution.domainName + ':' + proxyPort + '/');
+          button.textContent = 'Copied';
+          setTimeout(() => (button.textContent = 'Copy URL'), 900);
+        });
+      });
+      el('#distributionList').querySelectorAll('[data-invalidate]').forEach((button) => {
+        button.addEventListener('click', () => {
+          setActiveSite(button.dataset.invalidate);
+          el('input[name="paths"]').value = '/*';
+          el('#invalidatePanel').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+      });
+      el('#distributionList').querySelectorAll('[data-function]').forEach((button) => {
+        button.addEventListener('click', () => {
+          setActiveSite(button.dataset.function);
+          el('#functionsPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      });
+      el('#distributionList').querySelectorAll('[data-map-host]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const hostname = button.dataset.mapHost;
+          button.disabled = true;
+          button.textContent = 'Mapping...';
+          try {
+            const response = await fetch('/host-mappings', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ hostname }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || 'hostname mapping failed');
+            await load();
+          } catch (error) {
+            button.disabled = false;
+            button.textContent = 'Map hostname';
+            alert(error.message);
+          }
+        });
+      });
+      el('#distributionList').querySelectorAll('[data-delete]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const id = button.dataset.delete;
+          if (!confirm('Delete distribution ' + id + '?')) return;
+          const response = await fetch('/distributions/' + encodeURIComponent(id), { method: 'DELETE' });
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || 'delete failed');
+          }
+          await load();
+        });
+      });
+    }
+
     function render() {
       const stats = state.stats || {};
       const hits = Number(stats.hits || 0);
@@ -1637,117 +1830,16 @@ function adminDashboardHtml() {
       if (state.distributions.some((d) => d.id === selectedDistribution)) {
         functionDistribution.value = selectedDistribution;
       }
-      updateFunctionHint();
-
-      if (!state.distributions.length) {
-        el('#distributionList').innerHTML = '<div class="empty">No distributions yet. Use the form on the right to create the first one.</div>';
-      } else {
-        el('#distributionList').innerHTML = state.distributions.map((d) => {
-          const enabled = d.enabled !== false;
-          const proxyUrl = 'http://' + d.domainName + ':' + proxyPort + '/';
-          const originUrl = d.origin.domainName + (d.origin.originPath || '');
-          const ttl = [d.defaultCacheBehavior.minTtl, d.defaultCacheBehavior.defaultTtl, d.defaultCacheBehavior.maxTtl].join(' / ');
-          const hostMapping = state.hostMappings[String(d.domainName).toLowerCase()];
-          const mapAction = hostMapping && !hostMapping.mapped
-            ? \`<button class="ghost" data-map-host="\${escapeHtml(d.domainName)}">Map hostname</button>\`
-            : '';
-          return \`
-            <article class="dist">
-              <div class="dist-top">
-                <div>
-                  <div class="dist-id">\${d.id}</div>
-                  <div class="meta">
-                    <div><strong>Domain</strong> <a href="\${proxyUrl}" target="_blank" rel="noreferrer">\${proxyUrl}</a></div>
-                    <div><strong>Origin</strong> \${originUrl}</div>
-                    <div><strong>TTL</strong> min / default / max = \${ttl}</div>
-                  </div>
-                </div>
-                <div class="chip \${enabled ? 'good' : 'bad'}">\${enabled ? 'Enabled' : 'Disabled'}</div>
-              </div>
-              <div class="meta">
-                <div><strong>Comment</strong> \${d.comment || '—'}</div>
-                <div><strong>Created</strong> \${fmtTime(d.createdAt)}</div>
-                <div><strong>Viewer request</strong> \${escapeHtml(d.defaultCacheBehavior.functionAssociations?.viewerRequest || '—')}</div>
-                <div><strong>Viewer response</strong> \${escapeHtml(d.defaultCacheBehavior.functionAssociations?.viewerResponse || '—')}</div>
-              </div>
-              <div class="actions">
-                <button class="ghost" data-copy="\${d.id}">Copy ID</button>
-                <button class="ghost" data-proxy="\${d.id}">Copy proxy URL</button>
-                \${mapAction}
-                <button class="ghost" data-function="\${d.id}">Functions</button>
-                <button class="ghost" data-invalidate="\${d.id}">Invalidate /*</button>
-                <button class="ghost" data-delete="\${d.id}">Delete</button>
-              </div>
-            </article>
-          \`;
-        }).join('');
-
-        el('#distributionList').querySelectorAll('[data-copy]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            await copy(btn.dataset.copy);
-            btn.textContent = 'Copied';
-            setTimeout(() => (btn.textContent = 'Copy ID'), 900);
-          });
-        });
-        el('#distributionList').querySelectorAll('[data-proxy]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const id = btn.dataset.proxy;
-            const d = state.distributions.find((x) => x.id === id);
-            if (!d) return;
-            const url = 'http://' + d.domainName + ':' + proxyPort + '/';
-            await copy(url);
-            btn.textContent = 'Copied';
-            setTimeout(() => (btn.textContent = 'Copy proxy URL'), 900);
-          });
-        });
-        el('#distributionList').querySelectorAll('[data-invalidate]').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            el('input[name="distribution"]').value = btn.dataset.invalidate;
-            el('input[name="paths"]').value = '/*';
-            el('#invalidationForm').scrollIntoView({ behavior: 'smooth', block: 'center' });
-          });
-        });
-        el('#distributionList').querySelectorAll('[data-function]').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            el('#functionDistribution').value = btn.dataset.function;
-            updateFunctionHint();
-            el('#functionForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
-          });
-        });
-        el('#distributionList').querySelectorAll('[data-map-host]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const hostname = btn.dataset.mapHost;
-            btn.disabled = true;
-            btn.textContent = 'Mapping...';
-            try {
-              const r = await fetch('/host-mappings', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ hostname }),
-              });
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) throw new Error(data.error || 'hostname mapping failed');
-              await load();
-            } catch (error) {
-              btn.disabled = false;
-              btn.textContent = 'Map hostname';
-              alert(error.message);
-            }
-          });
-        });
-        el('#distributionList').querySelectorAll('[data-delete]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const id = btn.dataset.delete;
-            if (!confirm('Delete distribution ' + id + '?')) return;
-            const r = await fetch('/distributions/' + encodeURIComponent(id), { method: 'DELETE' });
-            if (!r.ok) {
-              const data = await r.json().catch(() => ({}));
-              throw new Error(data.error || 'delete failed');
-            }
-            await load();
-          });
-        });
+      const siteSwitcher = el('#siteSwitcher');
+      siteSwitcher.innerHTML = state.distributions.length
+        ? state.distributions.map((d) => \`<option value="\${escapeHtml(d.id)}">\${escapeHtml(d.domainName + ' — ' + d.id)}</option>\`).join('')
+        : '<option value="">Create a distribution first</option>';
+      if (!state.distributions.some((d) => d.id === state.activeDistributionId)) {
+        state.activeDistributionId = state.distributions[0]?.id || '';
       }
+
+      renderDistributionList();
+      setActiveSite(state.activeDistributionId);
 
       if (!state.revalidations.length) {
         el('#revalidationList').innerHTML = '<div class="empty">No cache revalidations or invalidations yet.</div>';
@@ -1768,6 +1860,7 @@ function adminDashboardHtml() {
       }
 
       el('#healthLine').textContent = state.health?.ok ? 'Healthy' : 'Unreachable';
+      el('.health-dot').classList.toggle('is-down', !state.health?.ok);
       el('#healthHint').textContent = state.health?.ok
         ? 'Admin API is responding on port ' + adminPort + '.'
         : 'Waiting for the admin API to answer.';
@@ -1792,10 +1885,38 @@ function adminDashboardHtml() {
     }
 
     el('#refreshBtn').addEventListener('click', load);
+    el('#siteSwitcher').addEventListener('change', (event) => setActiveSite(event.currentTarget.value));
+    el('#siteSearch').addEventListener('input', (event) => {
+      state.searchQuery = event.currentTarget.value;
+      renderDistributionList();
+      setActiveSite(state.activeDistributionId);
+    });
+    el('#copySiteIdBtn').addEventListener('click', async () => {
+      if (!state.activeDistributionId) return;
+      await copy(state.activeDistributionId);
+      el('#copySiteIdBtn').textContent = 'Copied';
+      setTimeout(() => (el('#copySiteIdBtn').textContent = 'Copy ID'), 900);
+    });
     el('#copyApiBtn').addEventListener('click', async () => {
       await copy('http://cowfront.local:' + adminPort + '/');
       el('#copyApiBtn').textContent = 'Copied';
       setTimeout(() => (el('#copyApiBtn').textContent = 'Copy admin URL'), 900);
+    });
+
+    const createDialog = el('#createSiteDialog');
+    const closeCreateDialog = () => {
+      createDialog.close();
+      el('#createForm').reset();
+      el('#createForm').querySelector('[name="compress"]').checked = true;
+    };
+    el('#openCreateDialogBtn').addEventListener('click', () => {
+      createDialog.showModal();
+      el('#createForm').querySelector('[name="origin"]').focus();
+    });
+    el('#closeCreateDialogBtn').addEventListener('click', closeCreateDialog);
+    el('#cancelCreateDialogBtn').addEventListener('click', closeCreateDialog);
+    createDialog.addEventListener('click', (event) => {
+      if (event.target === createDialog) closeCreateDialog();
     });
 
     el('#createForm').addEventListener('submit', async (event) => {
@@ -1834,12 +1955,15 @@ function adminDashboardHtml() {
         const data = await r.json().catch(() => ({}));
         throw new Error(data.error || 'create failed');
       }
+      const created = await r.json();
+      state.activeDistributionId = created.id;
       form.reset();
       form.querySelector('[name="compress"]').checked = true;
       await load();
+      createDialog.close();
     });
 
-    el('#functionDistribution').addEventListener('change', updateFunctionHint);
+    el('#functionDistribution').addEventListener('change', (event) => setActiveSite(event.currentTarget.value));
     el('#functionEventType').addEventListener('change', updateFunctionHint);
 
     el('#functionFile').addEventListener('change', async (event) => {

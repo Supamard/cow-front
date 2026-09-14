@@ -85,13 +85,15 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   assert.match(pageText, /Upload JavaScript/);
   assert.match(pageText, /Load remove \.html example/);
   assert.match(pageText, /Run through local CDN/);
+  assert.match(pageText, /id="siteSwitcher"/);
+  assert.match(pageText, /id="siteSearch"/);
   const dashboardScript = pageText.match(/<script>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(dashboardScript, 'dashboard script should be present');
   assert.doesNotThrow(() => new vm.Script(dashboardScript));
   assert.match(pageText, /http:\/\/cowfront\.local:/);
   const css = await fetch(`http://127.0.0.1:${adminPort}/style.css`);
   assert.equal(css.status, 200);
-  assert.match(await css.text(), /\.top-grid/);
+  assert.match(await css.text(), /\.workspace-grid/);
   assert.equal((await fetch('http://127.0.0.1:' + adminPort + '/favicon.ico')).status, 200);
   assert.equal((await fetch('http://127.0.0.1:' + adminPort + '/cowfront-logo.png')).status, 200);
   const revalidations = await fetch(`http://127.0.0.1:${adminPort}/revalidations`);

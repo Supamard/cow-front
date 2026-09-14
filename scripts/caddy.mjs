@@ -280,7 +280,7 @@ async function startDetachedCaddy() {
   const suffix = httpPort === 80 ? '' : `:${httpPort}`;
   console.log(`Caddy is running on port ${httpPort}:`);
   console.log(`  http://cowfront.local${suffix} -> 127.0.0.1:5744 (this machine only)`);
-  console.log(`  http://gh-dev.local${suffix}   -> ${fallbackHost}:${fallbackPort} (reachable on the LAN)`);
+  console.log(`  http://app.local${suffix}      -> ${fallbackHost}:${fallbackPort} (reachable on the LAN)`);
 }
 
 if (command === 'install') {

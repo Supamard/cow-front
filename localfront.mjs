@@ -2225,14 +2225,16 @@ function printDist(d) {
 const HELP = `CowFront — local CloudFront-like CDN for MinIO / any HTTP origin
 
 Usage:
-  node localfront.mjs serve
-  node localfront.mjs create-distribution --origin <url> [--origin-path /bucket] [options]
-  node localfront.mjs list-distributions
-  node localfront.mjs get-distribution <id>
-  node localfront.mjs update-distribution <id> [options]
-  node localfront.mjs delete-distribution <id>
-  node localfront.mjs create-invalidation <id> --paths "/*" ["/img/*" ...]
-  node localfront.mjs stats
+  cowfront serve
+  cowfront create-distribution --origin <url> [--origin-path /bucket] [options]
+  cowfront list-distributions
+  cowfront get-distribution <id>
+  cowfront update-distribution <id> [options]
+  cowfront delete-distribution <id>
+  cowfront create-invalidation <id> --paths "/*" ["/img/*" ...]
+  cowfront stats
+
+(or: node localfront.mjs <command>)
 
 Options for create/update:
   --origin <url>          origin endpoint, e.g. http://localhost:9000 (MinIO)
@@ -2299,7 +2301,7 @@ async function cli(argv) {
       }
       console.log('Created distribution:');
       printDist(created);
-      if (!up) console.log('\n(server not running — start it with: node localfront.mjs serve)');
+      if (!up) console.log('\n(server not running — start it with: cowfront serve)');
       return;
     }
 
@@ -2358,7 +2360,7 @@ async function cli(argv) {
     case 'create-invalidation': {
       const id = f._[0];
       if (!id) return console.error('usage: create-invalidation <id> --paths "/*"');
-      if (!up) return console.error('server must be running to invalidate cache (node localfront.mjs serve)');
+      if (!up) return console.error('server must be running to invalidate cache (cowfront serve)');
       let paths = [];
       if (Array.isArray(f.paths)) paths = f.paths;
       else if (typeof f.paths === 'string') paths = [f.paths];

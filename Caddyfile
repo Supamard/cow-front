@@ -68,12 +68,12 @@ http://system.hds.internal {
 # Two names on purpose: `.local` is reserved for mDNS (RFC 6762) and fights
 # Bonjour on macOS, so teammates use `.test` (RFC 6761, never resolvable on the
 # public internet). `.local` stays for this machine's own muscle memory.
-http://gh-dev.test, http://gh-dev.local {
+http://gh-dev.test, http://app.local {
 	reverse_proxy 127.0.0.1:3015
 }
 
 # Same destination by IP or any other Host header, preserving how port 80
-# behaved under the portproxy rule for clients that cannot resolve gh-dev.local.
+# behaved under the portproxy rule for clients that cannot resolve app.local.
 :{$LOCALFRONT_CADDY_PORT:80} {
 	reverse_proxy 127.0.0.1:3015
 }

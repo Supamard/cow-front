@@ -37,7 +37,7 @@ This applies the read-only download policy to `local/uforge-local/data/*`. The b
 **2. Create a distribution** pointing at the MinIO bucket:
 
 ```bash
-node localfront.mjs create-distribution \
+cowfront create-distribution \
   --origin http://localhost:9000 \
   --origin-path /assets \
   --default-ttl 3600
@@ -53,21 +53,20 @@ Install the optional loopback aliases:
 npm run hosts:setup
 ```
 
-Running `npm install` in the CowFront project, installing CowFront globally, or running `npm run setup` also starts this host setup automatically. On Windows, approve the Administrator prompt so the protected hosts file can be updated. The setup adds `cowfront.local`, `gh-dev.test`, `gh-dev.local`, `site.local`, `api.local`, and `app.local` as aliases for `127.0.0.1` and flushes the DNS cache automatically. Hosts files do not route ports, so a port is part of the URL for everything Caddy does not front:
+Running `npm install` in the CowFront project, installing CowFront globally, or running `npm run setup` also starts this host setup automatically. On Windows, approve the Administrator prompt so the protected hosts file can be updated. The setup adds `cowfront.local`, `gh-dev.test`, `app.local`, `site.local`, and `api.local` as aliases for `127.0.0.1` and flushes the DNS cache automatically. Hosts files do not route ports, so a port is part of the URL for everything Caddy does not front:
 
 ```text
 http://cowfront.local   -> CowFront admin dashboard (via Caddy)
 http://gh-dev.test      -> the project on port 3015 (via Caddy, shared with teammates)
-http://gh-dev.local     -> the same project, this machine only
+http://app.local        -> the same project, this machine only (via Caddy)
 http://site.local:8080  -> CowFront
 http://api.local:3001   -> API service
-http://app.local:3000   -> App service
 ```
 
 Create a distribution with a friendly viewer hostname:
 
 ```bash
-node localfront.mjs create-distribution --domain site.local \
+cowfront create-distribution --domain site.local \
   --origin http://localhost:9000 --origin-path /assets
 ```
 
@@ -134,7 +133,8 @@ Use `download` for public reads. It does not grant anonymous upload or delete ac
 **3. Start the CDN:**
 
 ```bash
-node localfront.mjs serve
+cowfront serve
+# or: npm run serve
 ```
 
 **4. Request an object through the CDN:**
@@ -165,7 +165,7 @@ For a MinIO bucket with an object prefix, include both values in the origin path
 ```bash
 MINIO_BUCKET=uforge-local
 MINIO_PREFIX=data/site.local
-node localfront.mjs create-distribution \
+cowfront create-distribution \
   --domain site.local \
   --origin http://localhost:9000 \
   --origin-path "/$MINIO_BUCKET/$MINIO_PREFIX"
@@ -174,7 +174,7 @@ node localfront.mjs create-distribution \
 The bucket and prefix are only command/config values; CowFront does not hard-code either one. To repair an existing distribution, use the same variables with `update-distribution`:
 
 ```bash
-node localfront.mjs update-distribution EM5T9ZZLUF20OC \
+cowfront update-distribution EM5T9ZZLUF20OC \
   --origin-path "/$MINIO_BUCKET/$MINIO_PREFIX"
 ```
 
@@ -195,15 +195,17 @@ Any of these select the distribution (checked in this order):
 
 ## CLI
 
-```
-node localfront.mjs serve
-node localfront.mjs create-distribution --origin <url> [--origin-path /bucket] [options]
-node localfront.mjs list-distributions
-node localfront.mjs get-distribution <id>
-node localfront.mjs update-distribution <id> [options]
-node localfront.mjs delete-distribution <id>
-node localfront.mjs create-invalidation <id> --paths "/*" ["/img/*" ...]
-node localfront.mjs stats
+If installed globally or linked (`npm link`), use `cowfront <command>`. You can also run `node localfront.mjs <command>` or npm scripts like `npm run serve`.
+
+```bash
+cowfront serve
+cowfront create-distribution --origin <url> [--origin-path /bucket] [options]
+cowfront list-distributions
+cowfront get-distribution <id>
+cowfront update-distribution <id> [options]
+cowfront delete-distribution <id>
+cowfront create-invalidation <id> --paths "/*" ["/img/*" ...]
+cowfront stats
 ```
 
 **Options** (create/update): `--origin`, `--origin-path`, `--default-ttl`, `--min-ttl`, `--max-ttl`, `--no-compress`, `--forward-query`, `--viewer-request-function`, `--viewer-response-function`, `--comment`, `--id`.
@@ -217,11 +219,11 @@ CowFront can run AWS-style **viewer request** and **viewer response** JavaScript
 The dashboard at `http://cowfront.local/` has a **Test CloudFront function** form. Select a distribution and event type, upload a `.js` file or paste the source directly, then choose **Save & associate**. Enter a path and choose **Run through local CDN** to see the status, headers, and response body without leaving the dashboard. The built-in **Load remove .html example** button provides an immediately runnable sample.
 
 ```powershell
-node localfront.mjs update-distribution EM5T9ZZLUF20OC `
+cowfront update-distribution EM5T9ZZLUF20OC `
   --viewer-request-function ./functions/viewer-request.js `
   --viewer-response-function ./functions/viewer-response.js
 
-node localfront.mjs serve
+cowfront serve
 curl.exe -i http://site.local/
 ```
 
@@ -258,7 +260,7 @@ Remove an association with `--no-viewer-request-function` or `--no-viewer-respon
 The copy-ready example at `examples/cloudfront-functions/remove-html-extension.js` redirects `/about.html` to `/about`, then internally maps the clean `/about` request back to the `/about.html` origin object. Directory paths such as `/docs/` map to `/docs/index.html`. Query parameters, including duplicates, are preserved. Associate it and test without following the redirect:
 
 ```powershell
-node localfront.mjs update-distribution EM5T9ZZLUF20OC `
+cowfront update-distribution EM5T9ZZLUF20OC `
   --viewer-request-function ./examples/cloudfront-functions/remove-html-extension.js
 
 curl.exe -i "http://site.local/about.html?lang=en"
@@ -324,8 +326,8 @@ Compatibility is intentionally focused on CloudFront Functions' HTTP lifecycle. 
 ## Invalidations
 
 ```bash
-node localfront.mjs create-invalidation E1A2B3C4D5E6F7 --paths "/*"
-node localfront.mjs create-invalidation E1A2B3C4D5E6F7 --paths "/img/*"
+cowfront create-invalidation E1A2B3C4D5E6F7 --paths "/*"
+cowfront create-invalidation E1A2B3C4D5E6F7 --paths "/img/*"
 ```
 
 Patterns support `*` wildcards, exactly like CloudFront invalidation paths.
@@ -358,13 +360,13 @@ Caddy owns port 80 and routes by hostname, so local URLs need no port suffix:
 ```text
 http://cowfront.local -> 127.0.0.1:5744   CowFront's dashboard, this machine only
 http://gh-dev.test    -> 127.0.0.1:3015   shared with other machines on the LAN
-http://gh-dev.local   -> 127.0.0.1:3015   the same project, kept for this machine
+http://app.local      -> 127.0.0.1:3015   the same project, kept for this machine
 http://<this-ip>/     -> 127.0.0.1:3015   same destination, for clients with no hosts entry
 ```
 
 The dashboard and the shared project sit behind one listener, so the split is enforced by a matcher rather than by the socket: `cowfront.local` answers `403` to any client whose address is not `127.0.0.1` or `::1`. `auto_https off` means Caddy makes no ACME or certificate requests, so it sends nothing out of the machine.
 
-Set `LOCALFRONT_CADDY_PORT` to move Caddy off port 80 (the `Caddyfile` and the `caddy:*` scripts both read that variable). Windows Firewall will ask to allow Caddy on first run: allow **Private** networks so teammates can reach `gh-dev.local`, and deny **Public**.
+Set `LOCALFRONT_CADDY_PORT` to move Caddy off port 80 (the `Caddyfile` and the `caddy:*` scripts both read that variable). Windows Firewall will ask to allow Caddy on first run: allow **Private** networks so teammates can reach `app.local`, and deny **Public**.
 
 Install Caddy per-user with Windows Package Manager, then validate and start it:
 
@@ -374,7 +376,7 @@ npm run caddy:check
 npm run caddy:activate
 ```
 
-Only one program can own port 80. On this machine it was held by a Windows portproxy rule (`0.0.0.0:80 -> 127.0.0.1:3015`), run by the IP Helper service — which is why a process listing blames `svchost` rather than naming the real owner. The Windows-only `caddy:activate` command validates the configuration, requests Administrator access, installs the host aliases, removes that portproxy rule, and starts Caddy in its place with logs in `.caddy/`. Caddy's `gh-dev.local` and catch-all routes preserve what the rule used to do, and the command restores the original rule if Caddy fails to start. Use these commands afterward:
+Only one program can own port 80. On this machine it was held by a Windows portproxy rule (`0.0.0.0:80 -> 127.0.0.1:3015`), run by the IP Helper service — which is why a process listing blames `svchost` rather than naming the real owner. The Windows-only `caddy:activate` command validates the configuration, requests Administrator access, installs the host aliases, removes that portproxy rule, and starts Caddy in its place with logs in `.caddy/`. Caddy's `app.local` and catch-all routes preserve what the rule used to do, and the command restores the original rule if Caddy fails to start. Use these commands afterward:
 
 ```powershell
 npm run caddy:reload
@@ -385,7 +387,7 @@ Creating, updating, or deleting a CowFront distribution automatically regenerate
 
 ### Sharing the project with teammates
 
-The shared name is **`gh-dev.test`**. `.test` is reserved by RFC 6761 and never resolves on the public internet, which makes it safe for a local tool. `gh-dev.local` still works on this machine, but do not hand it to teammates: `.local` is the mDNS namespace (RFC 6762) and collides with Bonjour on macOS.
+The shared name is **`gh-dev.test`**. `.test` is reserved by RFC 6761 and never resolves on the public internet, which makes it safe for a local tool. `app.local` still works on this machine, but do not hand it to teammates: `.local` is the mDNS namespace (RFC 6762) and collides with Bonjour on macOS.
 
 A hostname only reaches Caddy if it resolves on the *visitor's* machine — this is DNS, not something Caddy can configure. Print the instructions to send them:
 
@@ -432,7 +434,7 @@ When you overwrite an existing object such as `index.html` in MinIO, CowFront ke
 To publish the new object immediately, invalidate that path after uploading it:
 
 ```bash
-node localfront.mjs create-invalidation EM5T9ZZLUF20OC --paths "/index.html"
+cowfront create-invalidation EM5T9ZZLUF20OC --paths "/index.html"
 ```
 
 The next request through `http://site.local:8080/index.html` fetches the new content. Use `--paths "/*"` to invalidate the whole distribution. Invalidation actions and automatic TTL revalidations are shown in the dashboard's Revalidation history. You can choose a shorter default TTL when creating or updating a distribution, for example `--default-ttl 300` for five-minute revalidation.

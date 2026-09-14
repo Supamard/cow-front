@@ -10,13 +10,12 @@ const markerEnd = '# End CowFront host aliases';
 const legacyMarkerStart = '# LocalFront host aliases - managed block';
 const legacyMarkerEnd = '# End LocalFront host aliases';
 const defaultMappings = [
-  // Caddy fronts these two on port 80, so they have no port in their URL.
+  // Caddy fronts these on port 80, so they have no port in their URL.
   { hostname: 'cowfront.local', port: 80 },
   { hostname: 'gh-dev.test', port: 80 },
-  { hostname: 'gh-dev.local', port: 80 },
+  { hostname: 'app.local', port: 80 },
   { hostname: 'site.local', port: 8080 },
   { hostname: 'api.local', port: 3001 },
-  { hostname: 'app.local', port: 3000 },
 ];
 const defaultHostsPath = process.platform === 'win32'
   ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')

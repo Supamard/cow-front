@@ -23,6 +23,9 @@
   },
   "scripts": {
     "test": "node --test",
+    "start": "node localfront.mjs serve",
+    "cowfront": "node localfront.mjs",
+    "cow-front": "node localfront.mjs",
     "postinstall": "node scripts/install-hosts.mjs",
     "prepublishOnly": "npm test && npm pack --dry-run",
     "serve": "node localfront.mjs serve",

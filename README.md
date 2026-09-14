@@ -448,6 +448,44 @@ cowfront create-invalidation EM5T9ZZLUF20OC --paths "/index.html"
 
 The next request through `http://site.local:8080/index.html` fetches the new content. Use `--paths "/*"` to invalidate the whole distribution. Invalidation actions and automatic TTL revalidations are shown in the dashboard's Revalidation history. You can choose a shorter default TTL when creating or updating a distribution, for example `--default-ttl 300` for five-minute revalidation.
 
+## Sharing `distributions.json` with Teammates
+
+`distributions.json` is completely self-contained and portable, making it easy to copy from one developer's machine and use immediately on another without broken functions or missing routes.
+
+### How it works:
+1. **Embedded Function Code**: Any CloudFront functions associated with your distributions are automatically bundled into `distributions.json` under `functionCode`. When a teammate starts CowFront, missing `.localfront-functions/` files are automatically restored on disk.
+2. **Instant Host Mapping**: Teammates can map all distribution domains in one command:
+   ```bash
+   npm run setup
+   # or: cowfront setup-hosts
+   ```
+   `setup-hosts.mjs` automatically inspects `distributions.json` and adds all custom domains (`site.local`, etc.) to the hosts file. In the dashboard (`http://cowfront.local/`), an alert banner also offers a 1-click **Map All** button.
+3. **Caddy Hot-Sync**: When `cowfront serve` starts, Caddy routes for all distributions are automatically generated and hot-reloaded.
+
+### Sharing Workflows:
+
+- **Direct file copy**:
+  Send `distributions.json` to your teammate via Slack, email, or git. The recipient places it in their project directory and runs:
+  ```bash
+  npm run setup     # maps all domain names from distributions.json
+  cowfront serve    # starts server, auto-restores functions, and syncs Caddy
+  ```
+
+- **CLI Export & Import**:
+  ```bash
+  # Dev A: export portable distributions
+  cowfront export team-sites.json
+
+  # Dev B: import and restore
+  cowfront import team-sites.json
+  npm run setup
+  ```
+
+- **Dashboard Export & Import**:
+  - Open `http://cowfront.local/`.
+  - In the **Sites** panel, click **Export** to download `distributions.json`.
+  - Teammates can click **Import** to upload the file, then click **Map All** to map hostnames.
+
 ## Configuration (env)
 
 | Var | Default | Meaning |

@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
@@ -87,6 +88,11 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   assert.match(pageText, /Run through local CDN/);
   assert.match(pageText, /id="siteSwitcher"/);
   assert.match(pageText, /id="siteSearch"/);
+  assert.match(pageText, /id="editSiteDialog"/);
+  assert.match(pageText, /id="editSiteBtn"/);
+  assert.match(pageText, /id="editForm"/);
+  assert.match(pageText, /data-edit=/);
+  assert.match(pageText, /The distribution ID cannot be changed/);
   const dashboardScript = pageText.match(/<script>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(dashboardScript, 'dashboard script should be present');
   assert.doesNotThrow(() => new vm.Script(dashboardScript));
@@ -199,6 +205,58 @@ test('serve exposes the admin page and package stylesheet', async (t) => {
   assert.equal(invalidated.status, 201);
   const history = await fetch(`http://127.0.0.1:${adminPort}/revalidations`);
   assert.equal((await history.json()).revalidations[0].result, 'invalidated');
+
+  // Editing distribution via PUT API preserves distribution ID and updates editable fields
+  const putEditRes = await fetch(`http://127.0.0.1:${adminPort}/distributions/${distribution.id}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id: 'NEWFORBIDDENID123',
+      domainName: 'shop-updated.local',
+      origin: { domainName: 'http://127.0.0.1:9', originPath: '/store' },
+      comment: 'Updated comment',
+      defaultCacheBehavior: {
+        defaultTtl: 3600,
+        minTtl: 60,
+        maxTtl: 7200,
+        compress: false,
+        forwardQueryString: true,
+      },
+    }),
+  });
+  assert.equal(putEditRes.status, 200);
+  const putEdited = await putEditRes.json();
+  assert.equal(putEdited.id, distribution.id, 'Distribution ID must not change');
+  assert.equal(putEdited.domainName, 'shop-updated.local');
+  assert.equal(putEdited.origin.originPath, '/store');
+  assert.equal(putEdited.comment, 'Updated comment');
+  assert.equal(putEdited.defaultCacheBehavior.defaultTtl, 3600);
+  assert.equal(putEdited.defaultCacheBehavior.compress, false);
+  assert.equal(putEdited.defaultCacheBehavior.forwardQueryString, true);
+
+  // Editing via CLI update-distribution also preserves distribution ID
+  const cliUpdateIdAttempt = spawnSync(process.execPath, [
+    path.join(root, 'localfront.mjs'),
+    'update-distribution',
+    distribution.id,
+    '--id',
+    'SHOULDNOTCHANGE',
+    '--comment',
+    'CLI updated note',
+  ], {
+    cwd: tempDir,
+    env: {
+      ...process.env,
+      LOCALFRONT_CONFIG: configPath,
+      LOCALFRONT_ADMIN_PORT: String(adminPort),
+      LOCALFRONT_PORT: String(proxyPort),
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(cliUpdateIdAttempt.status, 0);
+  const afterCliUpdate = await (await fetch(`http://127.0.0.1:${adminPort}/distributions/${distribution.id}`)).json();
+  assert.equal(afterCliUpdate.id, distribution.id, 'Distribution ID must remain unchanged via CLI');
+  assert.equal(afterCliUpdate.comment, 'CLI updated note');
 });
 
 test('runs AWS-style CloudFront viewer request and response functions', async (t) => {
@@ -333,3 +391,166 @@ async function handler(event) {
   assert.equal(dashboardTestData.status, 301);
   assert.equal(dashboardTestData.headers.location, '/dashboard?lang=en');
 });
+
+test('distributions.json can be shared, exported, imported, and auto-hydrates missing function files and host mappings', async (t) => {
+  const tempDir = await mkdtemp(path.join(root, '.tmp-share-'));
+  const hostsPath = path.join(tempDir, 'hosts');
+  const caddyfilePath = path.join(tempDir, 'Caddyfile');
+  const configPath = path.join(tempDir, 'distributions.json');
+  await writeFile(hostsPath, '127.0.0.1 localhost\n', 'utf8');
+  await writeFile(caddyfilePath, '# CowFront distribution routes - managed block\n# End CowFront distribution routes\n', 'utf8');
+
+  const originPort = await freePort();
+  const adminPort = await freePort();
+  const proxyPort = await freePort();
+
+  const sharedFuncCode = `
+function handler(event) {
+  var request = event.request;
+  if (request.uri === '/shared-test') {
+    return {
+      statusCode: 200,
+      headers: { 'content-type': { value: 'text/plain' } },
+      body: 'portable and shared'
+    };
+  }
+  return request;
+}
+`;
+
+  // Write a portable distributions.json without creating .localfront-functions/
+  await writeFile(configPath, JSON.stringify({
+    distributions: [{
+      id: 'ESHAREDTEST1',
+      domainName: 'shared.local',
+      origin: { domainName: `http://127.0.0.1:${originPort}` },
+      defaultCacheBehavior: {
+        minTtl: 0,
+        defaultTtl: 60,
+        maxTtl: 300,
+        compress: false,
+        forwardQueryString: false,
+        cachedMethods: ['GET', 'HEAD'],
+        cacheKeyHeaders: [],
+        functionAssociations: {
+          viewerRequest: './.localfront-functions/ESHAREDTEST1-viewer-request.js',
+          viewerResponse: ''
+        }
+      },
+      functionCode: {
+        viewerRequest: sharedFuncCode
+      }
+    }]
+  }, null, 2), 'utf8');
+
+  // Verify setup-hosts.mjs picks up shared.local from distributions.json
+  const hostsSetup = spawnSync(process.execPath, [path.join(root, 'scripts', 'setup-hosts.mjs')], {
+    cwd: tempDir,
+    env: {
+      ...process.env,
+      LOCALFRONT_CONFIG: configPath,
+      LOCALFRONT_HOSTS_PATH: hostsPath,
+      LOCALFRONT_SKIP_DNS_FLUSH: '1',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(hostsSetup.status, 0, hostsSetup.stderr);
+  assert.match(await readFile(hostsPath, 'utf8'), /shared\.local/);
+
+  // Start CowFront on this shared distributions.json
+  const server = spawn(process.execPath, [path.join(root, 'localfront.mjs'), 'serve'], {
+    cwd: tempDir,
+    env: {
+      ...process.env,
+      LOCALFRONT_CONFIG: configPath,
+      LOCALFRONT_ADMIN_PORT: String(adminPort),
+      LOCALFRONT_PORT: String(proxyPort),
+      LOCALFRONT_HOSTS_PATH: hostsPath,
+      LOCALFRONT_CADDYFILE: caddyfilePath,
+      LOCALFRONT_SKIP_DNS_FLUSH: '1',
+      LOCALFRONT_SKIP_CADDY_RELOAD: '1',
+    },
+    stdio: 'ignore',
+  });
+
+  t.after(async () => {
+    if (server.exitCode === null) {
+      const exited = new Promise((resolve) => server.once('exit', resolve));
+      server.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  await waitFor(`http://127.0.0.1:${adminPort}/health`, server);
+
+  // Verify function file was auto-hydrated on disk
+  const hydratedFunctionPath = path.join(tempDir, '.localfront-functions', 'ESHAREDTEST1-viewer-request.js');
+  assert.equal(existsSync(hydratedFunctionPath), true, 'function file should be auto-restored on disk');
+  assert.equal(await readFile(hydratedFunctionPath, 'utf8'), sharedFuncCode);
+
+  // Verify proxy executes the restored function immediately
+  const proxyRes = await fetch(`http://127.0.0.1:${proxyPort}/shared-test`, {
+    headers: { 'x-distribution-id': 'ESHAREDTEST1' }
+  });
+  assert.equal(proxyRes.status, 200);
+  assert.equal(await proxyRes.text(), 'portable and shared');
+
+  // Verify CLI export writes portable distributions with embedded functions
+  const exportedPath = path.join(tempDir, 'exported.json');
+  const cliExport = spawnSync(process.execPath, [path.join(root, 'localfront.mjs'), 'export', exportedPath], {
+    cwd: tempDir,
+    env: {
+      ...process.env,
+      LOCALFRONT_CONFIG: configPath,
+      LOCALFRONT_ADMIN_PORT: String(adminPort),
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(cliExport.status, 0, cliExport.stderr);
+  const exportedData = JSON.parse(await readFile(exportedPath, 'utf8'));
+  assert.equal(exportedData.distributions.length, 1);
+  assert.ok(exportedData.distributions[0].functionCode.viewerRequest);
+
+  // Verify bulk host-mapping API
+  const bulkMapRes = await fetch(`http://127.0.0.1:${adminPort}/host-mappings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ all: true })
+  });
+  assert.equal(bulkMapRes.status, 200); // already mapped by setup-hosts above
+
+  // Verify CLI import
+  const toImportPath = path.join(tempDir, 'import-me.json');
+  await writeFile(toImportPath, JSON.stringify({
+    distributions: [{
+      id: 'EIMPORTED2',
+      domainName: 'imported.local',
+      origin: { domainName: `http://127.0.0.1:${originPort}` },
+      defaultCacheBehavior: {
+        functionAssociations: {
+          viewerRequest: './.localfront-functions/EIMPORTED2-req.js'
+        }
+      },
+      functionCode: {
+        viewerRequest: 'function handler(event) { return event.request; }\n'
+      }
+    }]
+  }), 'utf8');
+
+  const cliImport = spawnSync(process.execPath, [path.join(root, 'localfront.mjs'), 'import', toImportPath], {
+    cwd: tempDir,
+    env: {
+      ...process.env,
+      LOCALFRONT_CONFIG: configPath,
+      LOCALFRONT_ADMIN_PORT: String(adminPort),
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(cliImport.status, 0, cliImport.stderr);
+  assert.match(cliImport.stdout, /Imported 1 distribution/);
+
+  // Check that the imported function was also restored
+  assert.equal(existsSync(path.join(tempDir, '.localfront-functions', 'EIMPORTED2-req.js')), true);
+});
+

@@ -211,7 +211,8 @@ function normalizeDistribution(input) {
   const id = input.id || genId();
   const b = input.defaultCacheBehavior || {};
   const functions = b.functionAssociations || {};
-  return {
+  const functionCode = input.functionCode || {};
+  const res = {
     id,
     comment: input.comment || '',
     enabled: input.enabled !== false,
@@ -236,11 +237,67 @@ function normalizeDistribution(input) {
     },
     createdAt: input.createdAt || new Date().toISOString(),
   };
+  const codeEntries = {};
+  if (functionCode.viewerRequest && typeof functionCode.viewerRequest === 'string') {
+    codeEntries.viewerRequest = functionCode.viewerRequest;
+  }
+  if (functionCode.viewerResponse && typeof functionCode.viewerResponse === 'string') {
+    codeEntries.viewerResponse = functionCode.viewerResponse;
+  }
+  if (Object.keys(codeEntries).length > 0) res.functionCode = codeEntries;
+  return res;
 }
 
 // ----------------------------------------------------------------------------- CloudFront Functions
 function functionFile(file) {
   return path.isAbsolute(file) ? file : path.resolve(path.dirname(CONFIG_PATH), file);
+}
+
+function populateFunctionCodeFromDisk(distribution) {
+  const associations = distribution.defaultCacheBehavior?.functionAssociations || {};
+  distribution.functionCode = distribution.functionCode || {};
+  for (const eventType of ['viewerRequest', 'viewerResponse']) {
+    const filePath = associations[eventType];
+    if (filePath && !distribution.functionCode[eventType]) {
+      const resolved = functionFile(filePath);
+      if (existsSync(resolved)) {
+        try {
+          distribution.functionCode[eventType] = readFileSync(resolved, 'utf8');
+        } catch {}
+      }
+    }
+  }
+  if (!distribution.functionCode.viewerRequest && !distribution.functionCode.viewerResponse) {
+    delete distribution.functionCode;
+  }
+}
+
+function restoreFunctionFiles(distributions) {
+  let restored = 0;
+  for (const d of distributions) {
+    if (!d.functionCode) continue;
+    const associations = d.defaultCacheBehavior?.functionAssociations || {};
+    for (const eventType of ['viewerRequest', 'viewerResponse']) {
+      const code = d.functionCode[eventType];
+      if (!code || typeof code !== 'string' || !code.trim()) continue;
+      let relPath = associations[eventType];
+      if (!relPath) {
+        relPath = `./.localfront-functions/${d.id}-${eventType}.js`;
+        associations[eventType] = relPath;
+      }
+      const resolved = functionFile(relPath);
+      if (!existsSync(resolved)) {
+        try {
+          mkdirSync(path.dirname(resolved), { recursive: true });
+          writeFileSync(resolved, code, 'utf8');
+          restored++;
+        } catch (e) {
+          console.error(`[localfront] failed to restore function file ${resolved}: ${e.message}`);
+        }
+      }
+    }
+  }
+  return restored;
 }
 
 function eventHeadersFromRaw(rawHeaders) {
@@ -399,11 +456,24 @@ function bodyFromFunction(body, fallback) {
   throw new Error(`unsupported response body encoding: ${body.encoding}`);
 }
 
-async function runCloudFrontFunction(file, event) {
+async function runCloudFrontFunction(file, event, fallbackCode) {
   const resolved = functionFile(file);
   let source;
-  try { source = readFileSync(resolved, 'utf8'); }
-  catch (error) { throw new Error(`${file}: ${error.message}`); }
+  try {
+    source = readFileSync(resolved, 'utf8');
+  } catch (error) {
+    if (fallbackCode && typeof fallbackCode === 'string') {
+      try {
+        mkdirSync(path.dirname(resolved), { recursive: true });
+        writeFileSync(resolved, fallbackCode, 'utf8');
+        source = fallbackCode;
+      } catch {
+        source = fallbackCode;
+      }
+    } else {
+      throw new Error(`${file}: ${error.message}`);
+    }
+  }
 
   const sandbox = {
     __event: structuredClone(event),
@@ -604,7 +674,8 @@ async function deliver(res, req, dist, entry, cacheStatus, metrics, functionRequ
     const responseEvent = functionResponse({ status, headers, body });
     const result = await runCloudFrontFunction(
       viewerResponseFile,
-      functionEvent(dist, 'viewer-response', functionRequestContext, responseEvent, requestId)
+      functionEvent(dist, 'viewer-response', functionRequestContext, responseEvent, requestId),
+      dist.functionCode?.viewerResponse
     );
     if (result && typeof result === 'object' && typeof result.uri === 'string') {
       throw new Error('viewer-response function returned a request object; associate it as viewer-request instead');
@@ -674,7 +745,8 @@ async function handleProxy(req, res, state) {
     try {
       result = await runCloudFrontFunction(
         viewerRequestFile,
-        functionEvent(dist, 'viewer-request', functionRequestContext, null, requestId)
+        functionEvent(dist, 'viewer-request', functionRequestContext, null, requestId),
+        dist.functionCode?.viewerRequest
       );
     } catch (error) {
       return sendPlain(res, 502, `CowFront Function error (${viewerRequestFile}): ${error.message}\n`);
@@ -888,6 +960,35 @@ async function handleAdmin(req, res, state) {
 
   if (url.pathname === '/host-mappings' && method === 'POST') {
     const body = await readBody(req);
+    if (body.all) {
+      const mapped = mappedLoopbackHostnames();
+      const toMap = [];
+      for (const d of state.config.distributions) {
+        const h = String(d.domainName || '').trim().toLowerCase();
+        if (validHostname(h) && !isBuiltInLocalHostname(h) && !mapped.has(h)) {
+          toMap.push(h);
+        }
+      }
+      if (!toMap.length) {
+        return sendJson(res, 200, { mapped: [], message: 'all distribution hostnames are already mapped' });
+      }
+      const scriptPath = path.join(APP_ROOT, 'scripts', 'setup-hosts.mjs');
+      const args = [scriptPath, ...toMap.flatMap((h) => ['--map', `${h}:${PROXY_PORT}`])];
+      const result = spawnSync(process.execPath, args, {
+        cwd: APP_ROOT,
+        env: process.env,
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024,
+      });
+      if (result.status !== 0) {
+        const detail = (result.stderr || result.stdout || result.error?.message || 'bulk host setup failed').trim();
+        return sendJson(res, 500, { error: detail });
+      }
+      const newlyMapped = mappedLoopbackHostnames();
+      const successful = toMap.filter((h) => newlyMapped.has(h));
+      return sendJson(res, 201, { mapped: successful, total: successful.length });
+    }
+
     const hostname = String(body.hostname || '').trim().toLowerCase();
     if (!validHostname(hostname)) return sendJson(res, 400, { error: 'a valid hostname is required' });
     const distribution = state.config.distributions.find((item) => item.domainName.toLowerCase() === hostname);
@@ -915,6 +1016,31 @@ async function handleAdmin(req, res, state) {
 
   if (parts[0] === 'distributions') {
     const id = parts[1];
+
+    if (id === 'export' && method === 'GET') {
+      for (const d of state.config.distributions) populateFunctionCodeFromDisk(d);
+      return sendJson(res, 200, { distributions: state.config.distributions });
+    }
+
+    if (id === 'import' && method === 'POST') {
+      const body = await readBody(req);
+      const incoming = (Array.isArray(body.distributions) ? body.distributions : (Array.isArray(body) ? body : []))
+        .map(normalizeDistribution);
+      const replace = !!body.replace;
+      const existing = replace ? [] : state.config.distributions;
+      let count = 0;
+      for (const item of incoming) {
+        const idx = existing.findIndex((d) => d.id.toLowerCase() === item.id.toLowerCase());
+        if (idx !== -1) existing[idx] = item;
+        else existing.push(item);
+        count++;
+      }
+      state.config.distributions = existing;
+      const restored = restoreFunctionFiles(state.config.distributions);
+      for (const d of state.config.distributions) populateFunctionCodeFromDisk(d);
+      persist(state);
+      return sendJson(res, 200, { ok: true, imported: count, restoredFunctions: restored, total: state.config.distributions.length });
+    }
 
     if (!id && method === 'GET') {
       return sendJson(res, 200, { distributions: state.config.distributions });
@@ -950,6 +1076,8 @@ async function handleAdmin(req, res, state) {
         associations[body.eventType] = functionPath;
         // Treat re-saving the same managed file under another event as a move, not a second association.
         if (associations[otherEventType] === functionPath) associations[otherEventType] = '';
+        state.config.distributions[idx].functionCode = state.config.distributions[idx].functionCode || {};
+        state.config.distributions[idx].functionCode[body.eventType] = body.code;
         persist(state);
         return sendJson(res, 201, {
           distribution: state.config.distributions[idx].id,
@@ -1418,6 +1546,7 @@ function adminDashboardHtml() {
       </label>
       <div class="context-actions">
         <button class="secondary" type="button" id="copySiteIdBtn" disabled>Copy ID</button>
+        <button class="secondary" type="button" id="editSiteBtn" disabled>Edit site</button>
         <a class="button-link primary" id="openSiteBtn" href="#" target="_blank" rel="noreferrer" aria-disabled="true">Open site</a>
       </div>
     </section>
@@ -1429,9 +1558,18 @@ function adminDashboardHtml() {
             <h2 id="sitesTitle">Sites</h2>
             <p class="hint">Select a site to keep every tool in sync.</p>
           </div>
-          <div class="count-badge" id="distCount">0 total</div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="ghost" id="exportDistributionsBtn" type="button" title="Export distributions with embedded functions">Export</button>
+            <button class="ghost" id="importDistributionsBtn" type="button" title="Import distributions.json">Import</button>
+            <input type="file" id="importFileInput" accept=".json" style="display:none;" />
+            <div class="count-badge" id="distCount">0 total</div>
+          </div>
         </div>
         <div class="panel-body">
+          <div id="unmappedHostBanner" style="display:none; padding:10px 14px; margin-bottom:12px; background:rgba(255,212,140,0.12); border:1px solid rgba(255,212,140,0.3); border-radius:12px; align-items:center; justify-content:space-between; gap:10px;">
+            <span style="font-size:13px; color:var(--warn);">⚠️ <strong id="unmappedHostCount">0</strong> domain(s) not mapped in hosts</span>
+            <button class="ghost" id="mapAllHostsBtn" type="button" style="font-size:12px; padding:4px 10px;">Map All</button>
+          </div>
           <label class="search-field"><span>Find a site</span>
             <input id="siteSearch" type="search" placeholder="Domain, ID, or origin" autocomplete="off" />
           </label>
@@ -1585,6 +1723,74 @@ function adminDashboardHtml() {
           </form>
           </div>
         </dialog>
+
+        <dialog class="create-dialog" id="editSiteDialog" aria-labelledby="editSiteTitle">
+          <div class="dialog-head">
+            <div>
+              <h2 id="editSiteTitle">Edit distribution</h2>
+              <p class="hint" id="editSiteSubtitle">Update distribution settings.</p>
+            </div>
+            <button class="icon-button" id="closeEditDialogBtn" type="button" aria-label="Close edit distribution dialog">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="m6 6 12 12M18 6 6 18" />
+              </svg>
+            </button>
+          </div>
+          <div class="panel-body">
+          <form id="editForm" method="dialog">
+            <input type="hidden" name="id" id="editDistId" />
+            <div class="field-row">
+              <label>Distribution ID
+                <input id="editDistIdDisplay" disabled readonly tabindex="-1" style="background: var(--surface-muted); color: var(--muted-foreground); cursor: not-allowed;" />
+              </label>
+              <label>Friendly hostname
+                <input name="domain" id="editDomain" placeholder="site.local" required />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>Origin URL
+                <input name="origin" id="editOrigin" placeholder="http://localhost:9000" required />
+              </label>
+              <label>Origin path
+                <input name="origin-path" id="editOriginPath" placeholder="/assets" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>Default TTL
+                <input name="default-ttl" id="editDefaultTtl" type="number" min="0" placeholder="86400" />
+              </label>
+              <label>Min TTL
+                <input name="min-ttl" id="editMinTtl" type="number" min="0" placeholder="0" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>Max TTL
+                <input name="max-ttl" id="editMaxTtl" type="number" min="0" placeholder="31536000" />
+              </label>
+              <label style="display:flex; flex-direction:column; justify-content:center;">
+                <span style="font-size:12px; font-weight:700; margin-bottom:6px;">Status</span>
+                <span class="checks" style="margin:0; padding:4px 0;">
+                  <label><input name="enabled" id="editEnabled" type="checkbox" /> Enabled</label>
+                </span>
+              </label>
+            </div>
+            <label>Comment
+              <textarea name="comment" id="editComment" placeholder="Optional note for this distribution"></textarea>
+            </label>
+            <div class="checks">
+              <label><input name="compress" id="editCompress" type="checkbox" /> Compress objects</label>
+              <label><input name="forward-query" id="editForwardQuery" type="checkbox" /> Forward query string</label>
+            </div>
+            <div class="form-footer">
+              <span class="hint">The distribution ID cannot be changed.</span>
+              <div class="dialog-actions">
+                <button class="secondary" id="cancelEditDialogBtn" type="button">Cancel</button>
+                <button class="primary" type="submit">Save changes</button>
+              </div>
+            </div>
+          </form>
+          </div>
+        </dialog>
       </div>
     </main>
 
@@ -1670,6 +1876,7 @@ function adminDashboardHtml() {
       el('#functionDistribution').value = state.activeDistributionId;
       el('input[name="distribution"]').value = state.activeDistributionId;
       el('#copySiteIdBtn').disabled = !distribution;
+      el('#editSiteBtn').disabled = !distribution;
 
       const openButton = el('#openSiteBtn');
       if (distribution) {
@@ -1737,6 +1944,7 @@ function adminDashboardHtml() {
             <div class="actions">
               <button class="ghost" data-proxy="\${escapeHtml(d.id)}">Copy URL</button>
               \${mapAction}
+              <button class="ghost" data-edit="\${escapeHtml(d.id)}">Edit</button>
               <button class="ghost" data-function="\${escapeHtml(d.id)}">Functions</button>
               <button class="ghost" data-invalidate="\${escapeHtml(d.id)}">Invalidate</button>
               <button class="ghost" data-delete="\${escapeHtml(d.id)}">Delete</button>
@@ -1747,6 +1955,9 @@ function adminDashboardHtml() {
 
       el('#distributionList').querySelectorAll('[data-select-site]').forEach((button) => {
         button.addEventListener('click', () => setActiveSite(button.dataset.selectSite));
+      });
+      el('#distributionList').querySelectorAll('[data-edit]').forEach((button) => {
+        button.addEventListener('click', () => openEditDialog(button.dataset.edit));
       });
       el('#distributionList').querySelectorAll('[data-proxy]').forEach((button) => {
         button.addEventListener('click', async () => {
@@ -1841,6 +2052,20 @@ function adminDashboardHtml() {
       renderDistributionList();
       setActiveSite(state.activeDistributionId);
 
+      const unmapped = state.distributions.filter((d) => {
+        const mapping = state.hostMappings[String(d.domainName).toLowerCase()];
+        return mapping && !mapping.mapped && !mapping.builtIn;
+      });
+      const banner = el('#unmappedHostBanner');
+      if (banner) {
+        if (unmapped.length > 0) {
+          banner.style.display = 'flex';
+          el('#unmappedHostCount').textContent = unmapped.length;
+        } else {
+          banner.style.display = 'none';
+        }
+      }
+
       if (!state.revalidations.length) {
         el('#revalidationList').innerHTML = '<div class="empty">No cache revalidations or invalidations yet.</div>';
       } else {
@@ -1886,6 +2111,74 @@ function adminDashboardHtml() {
 
     el('#refreshBtn').addEventListener('click', load);
     el('#siteSwitcher').addEventListener('change', (event) => setActiveSite(event.currentTarget.value));
+
+    el('#mapAllHostsBtn')?.addEventListener('click', async () => {
+      const btn = el('#mapAllHostsBtn');
+      btn.disabled = true;
+      btn.textContent = 'Mapping...';
+      try {
+        const response = await fetch('/host-mappings', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ all: true }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Bulk mapping failed');
+        await load();
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Map All';
+      }
+    });
+
+    el('#exportDistributionsBtn')?.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/distributions/export');
+        const data = await res.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'distributions.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        alert('Export failed: ' + err.message);
+      }
+    });
+
+    el('#importDistributionsBtn')?.addEventListener('click', () => {
+      el('#importFileInput')?.click();
+    });
+
+    el('#importFileInput')?.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        const distributions = Array.isArray(parsed.distributions) ? parsed.distributions : (Array.isArray(parsed) ? parsed : []);
+        if (!distributions.length) throw new Error('No distributions found in selected file.');
+        const replace = confirm('Found ' + distributions.length + ' distribution(s).\\nClick OK to MERGE with existing sites, or Cancel to REPLACE all existing sites.');
+        const res = await fetch('/distributions/import', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ distributions, replace: !replace }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || 'Import failed');
+        alert('Successfully imported ' + result.imported + ' distribution(s)!');
+        await load();
+      } catch (err) {
+        alert('Import failed: ' + err.message);
+      } finally {
+        e.target.value = '';
+      }
+    });
     el('#siteSearch').addEventListener('input', (event) => {
       state.searchQuery = event.currentTarget.value;
       renderDistributionList();
@@ -1961,6 +2254,84 @@ function adminDashboardHtml() {
       form.querySelector('[name="compress"]').checked = true;
       await load();
       createDialog.close();
+    });
+
+    const editDialog = el('#editSiteDialog');
+    const closeEditDialog = () => {
+      editDialog.close();
+      el('#editForm').reset();
+    };
+    el('#closeEditDialogBtn').addEventListener('click', closeEditDialog);
+    el('#cancelEditDialogBtn').addEventListener('click', closeEditDialog);
+    editDialog.addEventListener('click', (event) => {
+      if (event.target === editDialog) closeEditDialog();
+    });
+
+    function openEditDialog(id) {
+      const d = state.distributions.find((item) => item.id === id);
+      if (!d) return;
+      el('#editDistId').value = d.id;
+      el('#editDistIdDisplay').value = d.id;
+      el('#editSiteSubtitle').textContent = 'Updating ' + d.id + ' (' + d.domainName + ')';
+      el('#editDomain').value = d.domainName || '';
+      el('#editOrigin').value = d.origin?.domainName || '';
+      el('#editOriginPath').value = d.origin?.originPath || '';
+      el('#editDefaultTtl').value = d.defaultCacheBehavior?.defaultTtl ?? 86400;
+      el('#editMinTtl').value = d.defaultCacheBehavior?.minTtl ?? 0;
+      el('#editMaxTtl').value = d.defaultCacheBehavior?.maxTtl ?? 31536000;
+      el('#editEnabled').checked = d.enabled !== false;
+      el('#editCompress').checked = d.defaultCacheBehavior?.compress !== false;
+      el('#editForwardQuery').checked = !!d.defaultCacheBehavior?.forwardQueryString;
+      el('#editComment').value = d.comment || '';
+      editDialog.showModal();
+      el('#editDomain').focus();
+    }
+
+    el('#editSiteBtn').addEventListener('click', () => {
+      if (state.activeDistributionId) openEditDialog(state.activeDistributionId);
+    });
+
+    el('#editForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const id = el('#editDistId').value;
+      const data = Object.fromEntries(new FormData(form).entries());
+      const body = {
+        domainName: data.domain?.trim() || undefined,
+        enabled: form.querySelector('#editEnabled').checked,
+        comment: data.comment || '',
+        origin: {
+          domainName: data.origin?.trim(),
+          originPath: data['origin-path'] !== undefined ? data['origin-path'].trim() : '',
+        },
+        defaultCacheBehavior: {
+          compress: form.querySelector('#editCompress').checked,
+          forwardQueryString: form.querySelector('#editForwardQuery').checked,
+          defaultTtl: data['default-ttl'] !== '' && !isNaN(Number(data['default-ttl'])) ? Number(data['default-ttl']) : undefined,
+          minTtl: data['min-ttl'] !== '' && !isNaN(Number(data['min-ttl'])) ? Number(data['min-ttl']) : undefined,
+          maxTtl: data['max-ttl'] !== '' && !isNaN(Number(data['max-ttl'])) ? Number(data['max-ttl']) : undefined,
+        },
+      };
+      const submitBtn = form.querySelector('button[type="submit"]');
+      submitBtn.disabled = true;
+      try {
+        const r = await fetch('/distributions/' + encodeURIComponent(id), {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.error || 'update failed');
+        }
+        editDialog.close();
+        await load();
+        setActiveSite(id);
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        submitBtn.disabled = false;
+      }
     });
 
     el('#functionDistribution').addEventListener('change', (event) => setActiveSite(event.currentTarget.value));
@@ -2076,6 +2447,7 @@ function adminDashboardHtml() {
 
 function persist(state) {
   state.suppressReload = true;
+  for (const d of state.config.distributions) populateFunctionCodeFromDisk(d);
   saveConfig({ distributions: state.config.distributions });
   const caddy = syncCaddyDistributionRoutes(state.config.distributions);
   if (caddy.configured && !caddy.reloaded && caddy.error) {
@@ -2087,8 +2459,12 @@ function persist(state) {
 // ----------------------------------------------------------------------------- serve
 function serve() {
   const cfg = loadConfig();
+  const distributions = cfg.distributions.map(normalizeDistribution);
+  restoreFunctionFiles(distributions);
+  for (const d of distributions) populateFunctionCodeFromDisk(d);
+
   const state = {
-    config: { distributions: cfg.distributions.map(normalizeDistribution) },
+    config: { distributions },
     cache: new Cache(CACHE_MAX),
     metrics: { requests: 0, hits: 0, misses: 0, refreshHits: 0 },
     revalidations: [],
@@ -2097,7 +2473,7 @@ function serve() {
 
   // persist normalized form once so IDs/domains are stable on disk
   saveConfig({ distributions: state.config.distributions });
-  syncCaddyDistributionRoutes(state.config.distributions, false);
+  syncCaddyDistributionRoutes(state.config.distributions, true);
 
   if (existsSync(CONFIG_PATH)) {
     let t;
@@ -2107,7 +2483,10 @@ function serve() {
       t = setTimeout(() => {
         try {
           const c = loadConfig();
-          state.config.distributions = c.distributions.map(normalizeDistribution);
+          const nextDistributions = c.distributions.map(normalizeDistribution);
+          restoreFunctionFiles(nextDistributions);
+          for (const d of nextDistributions) populateFunctionCodeFromDisk(d);
+          state.config.distributions = nextDistributions;
           syncCaddyDistributionRoutes(state.config.distributions);
           console.log('[localfront] config reloaded — %d distribution(s)', state.config.distributions.length);
         } catch (e) {
@@ -2144,6 +2523,16 @@ function serve() {
       console.log(`  ${d.id}  ${d.domainName}  ->  ${d.origin.domainName}${d.origin.originPath || ''}  ${d.enabled ? '' : '(disabled)'}`);
     }
   }
+
+  const mapped = mappedLoopbackHostnames();
+  const unmapped = state.config.distributions
+    .map((d) => String(d.domainName || '').trim().toLowerCase())
+    .filter((h) => validHostname(h) && !isBuiltInLocalHostname(h) && !mapped.has(h));
+  if (unmapped.length) {
+    console.log(`\n[hosts] Note: ${unmapped.length} distribution domain(s) not mapped in your hosts file:`);
+    console.log(`  ${unmapped.join(', ')}`);
+    console.log(`  Run "npm run setup" or click "Map All" at http://cowfront.local/ to map them.\n`);
+  }
 }
 
 // ----------------------------------------------------------------------------- CLI
@@ -2168,14 +2557,16 @@ function distFromFlags(f, existing) {
   d.defaultCacheBehavior = d.defaultCacheBehavior || {};
   if (f.origin) d.origin.domainName = f.origin;
   if (f['origin-path'] !== undefined) d.origin.originPath = f['origin-path'] === true ? '' : f['origin-path'];
-  if (f.comment) d.comment = f.comment;
-  if (f.id) d.id = f.id;
+  if (f.comment !== undefined) d.comment = f.comment;
+  if (!existing && f.id) d.id = f.id;
   if (f.domain) d.domainName = f.domain;
   if (f['default-ttl'] !== undefined) d.defaultCacheBehavior.defaultTtl = +f['default-ttl'];
   if (f['min-ttl'] !== undefined) d.defaultCacheBehavior.minTtl = +f['min-ttl'];
   if (f['max-ttl'] !== undefined) d.defaultCacheBehavior.maxTtl = +f['max-ttl'];
   if (f.compress === false) d.defaultCacheBehavior.compress = false;
-  if (f['forward-query']) d.defaultCacheBehavior.forwardQueryString = true;
+  if (f.compress === true) d.defaultCacheBehavior.compress = true;
+  if (f['forward-query'] !== undefined) d.defaultCacheBehavior.forwardQueryString = !!f['forward-query'];
+  if (f.enabled !== undefined) d.enabled = f.enabled !== 'false' && f.enabled !== false;
   d.defaultCacheBehavior.functionAssociations = d.defaultCacheBehavior.functionAssociations || {};
   if (f['viewer-request-function'] !== undefined) {
     d.defaultCacheBehavior.functionAssociations.viewerRequest = f['viewer-request-function'] === false
@@ -2233,6 +2624,9 @@ Usage:
   cowfront delete-distribution <id>
   cowfront create-invalidation <id> --paths "/*" ["/img/*" ...]
   cowfront stats
+  cowfront export [file.json]
+  cowfront import <file.json> [--replace]
+  cowfront setup-hosts (or map-hosts)
 
 (or: node localfront.mjs <command>)
 
@@ -2329,13 +2723,15 @@ async function cli(argv) {
       const id = f._[0];
       if (!id) return console.error('usage: update-distribution <id> [options]');
       let updated;
-      if (up) updated = await api('PUT', `/distributions/${id}`, distFromFlags(f));
+      const flags = { ...f };
+      delete flags.id;
+      if (up) updated = await api('PUT', `/distributions/${id}`, distFromFlags(flags));
       else {
         const cfg = loadConfig();
         cfg.distributions = cfg.distributions.map(normalizeDistribution);
         const idx = cfg.distributions.findIndex((x) => x.id.toLowerCase() === id.toLowerCase());
         if (idx === -1) return console.error(`distribution ${id} not found`);
-        updated = normalizeDistribution(distFromFlags(f, cfg.distributions[idx]));
+        updated = normalizeDistribution(distFromFlags(flags, cfg.distributions[idx]));
         cfg.distributions[idx] = updated;
         saveConfig(cfg);
       }
@@ -2374,6 +2770,85 @@ async function cli(argv) {
     case 'stats': {
       if (!up) return console.error('server not running');
       console.log(JSON.stringify(await api('GET', '/stats'), null, 2));
+      return;
+    }
+
+    case 'export': {
+      const target = f._[0];
+      const cfg = loadConfig();
+      const dists = cfg.distributions.map(normalizeDistribution);
+      for (const d of dists) populateFunctionCodeFromDisk(d);
+      const output = JSON.stringify({ distributions: dists }, null, 2);
+      if (target) {
+        writeFileSync(path.resolve(process.cwd(), target), output + '\n', 'utf8');
+        console.log(`Exported ${dists.length} distribution(s) to ${target}`);
+      } else {
+        console.log(output);
+      }
+      return;
+    }
+
+    case 'import': {
+      const source = f._[0];
+      if (!source) {
+        console.error('usage: cowfront import <file.json> [--replace]');
+        process.exitCode = 1;
+        return;
+      }
+      const resolved = path.resolve(process.cwd(), source);
+      if (!existsSync(resolved)) {
+        console.error(`file not found: ${source}`);
+        process.exitCode = 1;
+        return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(readFileSync(resolved, 'utf8'));
+      } catch (e) {
+        console.error(`invalid JSON in ${source}: ${e.message}`);
+        process.exitCode = 1;
+        return;
+      }
+      const incoming = (Array.isArray(parsed.distributions) ? parsed.distributions : (Array.isArray(parsed) ? parsed : []))
+        .map(normalizeDistribution);
+      if (!incoming.length) {
+        console.error('no distributions found in file');
+        process.exitCode = 1;
+        return;
+      }
+
+      if (up) {
+        const res = await api('POST', '/distributions/import', { distributions: incoming, replace: !!f.replace });
+        console.log(`Imported ${res.imported} distribution(s) (${res.restoredFunctions || 0} function file(s) restored).`);
+      } else {
+        const cfg = loadConfig();
+        const existing = f.replace ? [] : cfg.distributions.map(normalizeDistribution);
+        let count = 0;
+        for (const item of incoming) {
+          const idx = existing.findIndex((d) => d.id.toLowerCase() === item.id.toLowerCase());
+          if (idx !== -1) existing[idx] = item;
+          else existing.push(item);
+          count++;
+        }
+        const restored = restoreFunctionFiles(existing);
+        for (const d of existing) populateFunctionCodeFromDisk(d);
+        saveConfig({ distributions: existing });
+        syncCaddyDistributionRoutes(existing, false);
+        console.log(`Imported ${count} distribution(s) (${restored} function file(s) restored).`);
+        console.log('\nTo map domain names to your hosts file, run: npm run setup');
+      }
+      return;
+    }
+
+    case 'setup-hosts':
+    case 'map-hosts': {
+      const scriptPath = path.join(APP_ROOT, 'scripts', 'setup-hosts.mjs');
+      const result = spawnSync(process.execPath, [scriptPath], {
+        cwd: APP_ROOT,
+        env: process.env,
+        stdio: 'inherit',
+      });
+      process.exitCode = result.status ?? 0;
       return;
     }
 

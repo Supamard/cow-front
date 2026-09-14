@@ -79,11 +79,33 @@ function managedHostnames(text) {
   return hostnames;
 }
 
+function distributionMappings() {
+  const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  const configPath = process.env.LOCALFRONT_CONFIG || path.resolve(process.cwd(), 'distributions.json');
+  const targetPath = existsSync(configPath) ? configPath : path.resolve(root, 'distributions.json');
+  if (!existsSync(targetPath)) return [];
+  try {
+    const raw = readFileSync(targetPath, 'utf8');
+    const config = JSON.parse(raw);
+    const dists = Array.isArray(config.distributions) ? config.distributions : [];
+    const results = [];
+    for (const d of dists) {
+      const hostname = String(d.domainName || '').trim().toLowerCase();
+      if (hostname && !hostname.endsWith('.localhost') && hostname !== 'localhost') {
+        results.push({ hostname, port: null });
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 try {
   if (!existsSync(hostsPath)) throw new Error(`hosts file not found at ${hostsPath}`);
   const current = readFileSync(hostsPath, 'utf8');
   const existingMappings = managedHostnames(current).map((hostname) => ({ hostname, port: null }));
-  const mappings = [...defaultMappings, ...existingMappings, ...customMappings()];
+  const mappings = [...defaultMappings, ...distributionMappings(), ...existingMappings, ...customMappings()];
   const hostnames = [...new Set(mappings.map(({ hostname }) => hostname))];
   const withoutBlock = removeManagedBlock(current);
   const next = remove
